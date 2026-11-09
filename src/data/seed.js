@@ -1,7 +1,6 @@
 // EXEMPELDATA – visas första gången appen öppnas. Rensa via Inställningar.
 import { uid } from './local.js';
-const iso = d => d.toLocaleDateString('sv-SE');
-export function mondayOf(d) { const x = new Date(d); x.setHours(0,0,0,0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
+import { iso, mondayOf } from '../time.js';
 export function seedData() {
   const m = mondayOf(new Date()); const day = n => { const d = new Date(m); d.setDate(d.getDate() + n); return iso(d); };
   const today = (new Date().getDay() + 6) % 7;

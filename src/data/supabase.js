@@ -1,30 +1,57 @@
 // Supabase-implementation med realtidssynk och localStorage som offline-cache (läsning).
 import { createClient } from '@supabase/supabase-js';
 const CACHE = 'familjeskarm:cache:';
+const PAGE = 1000; // PostgREST svarar som standard med högst 1000 rader per anrop
+const TIMEOUT_MS = 20000;
 export function createSupabaseStore({ supabaseUrl, supabaseAnonKey }) {
-  const sb = createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true } });
-  const subs = new Set(); let ch;
-  const emit = () => subs.forEach(f => f());
+  // Utan timeout kan ett hängande anrop på dåligt wifi låsa all vidare uppdatering.
+  const timedFetch = (u, o = {}) => fetch(u, { ...o, signal: o.signal ?? AbortSignal.timeout?.(TIMEOUT_MS) });
+  const sb = createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true }, global: { fetch: timedFetch } });
+  const subs = new Set(); let ch, onAuth = () => {};
+  // emit(tabell) = bara den tabellen har ändrats; emit() = ladda om allt
+  const emit = t => subs.forEach(f => f(typeof t === 'string' ? t : undefined));
   const chk = ({ data, error }) => { if (error) throw error; return data; };
   function listen() {
     if (ch) return;
-    ch = sb.channel('familj').on('postgres_changes', { event: '*', schema: 'public' }, emit).subscribe();
+    ch = sb.channel('familj').on('postgres_changes', { event: '*', schema: 'public' }, p => emit(p.table)).subscribe();
   }
-  sb.auth.onAuthStateChange((ev, s) => { if (s) listen(); if (ev === 'SIGNED_OUT' && ch) { sb.removeChannel(ch); ch = null; } });
-  addEventListener('online', emit);
+  sb.auth.onAuthStateChange((ev, s) => {
+    if (s) listen(); if (ev === 'SIGNED_OUT' && ch) { sb.removeChannel(ch); ch = null; }
+    setTimeout(() => onAuth(ev, !!s), 0); // aldrig Supabase-anrop direkt i den här callbacken (risk för låsning)
+  });
+  addEventListener('online', () => emit());
   const hm = v => (typeof v === 'string' && v.length > 5 ? v.slice(0, 5) : v);
   const norm = r => (r && ('start' in r || 'end' in r) ? { ...r, start: hm(r.start), end: hm(r.end) } : r);
-  const after = async r => { emit(); return r; };
+  const cached = t => { try { return JSON.parse(localStorage.getItem(CACHE + t) || '[]').map(norm); } catch { return []; } };
+  // Hämtar alla rader sidvis så att inget tappas när en tabell växer förbi API:ts radgräns.
+  async function fetchAll(t) {
+    const rows = [];
+    for (;;) {
+      const { data, count, error } = await sb.from(t).select('*', { count: 'exact' }).order('created_at').order('id').range(rows.length, rows.length + PAGE - 1);
+      if (error) throw error;
+      rows.push(...data);
+      if (!data.length || count == null || rows.length >= count) return rows;
+    }
+  }
   return {
     kind: 'supabase', client: sb,
     async list(t) {
-      try { const d = chk(await sb.from(t).select('*').order('created_at')).map(norm); localStorage.setItem(CACHE + t, JSON.stringify(d)); return d; }
-      catch (e) { console.warn('offline, använder cache', t, e.message); return JSON.parse(localStorage.getItem(CACHE + t) || '[]').map(norm); }
+      let d;
+      try { d = (await fetchAll(t)).map(norm); }
+      catch (e) { console.warn('offline, använder cache', t, e.message); return cached(t); }
+      try { localStorage.setItem(CACHE + t, JSON.stringify(d)); } catch { /* full lagring ska inte dölja färsk data */ }
+      return d;
     },
-    async add(t, o) { return after(norm(chk(await sb.from(t).insert(o).select().single()))); },
-    async update(t, id, p) { return after(norm(chk(await sb.from(t).update(p).eq('id', id).select().single()))); },
-    async remove(t, id) { chk(await sb.from(t).delete().eq('id', id)); emit(); },
+    async add(t, o) { const r = norm(chk(await sb.from(t).insert(o).select().single())); emit(t); return r; },
+    async update(t, id, p) { const r = norm(chk(await sb.from(t).update(p).eq('id', id).select().single())); emit(t); return r; },
+    async remove(t, id) { chk(await sb.from(t).delete().eq('id', id)); emit(t); if (t === 'recipes') emit('meal_plan'); },
+    // Tömmer en hel tabell i ett anrop (används av "Rensa all data")
+    async clear(t) { chk(await sb.from(t).delete().not('id', 'is', null)); emit(t); },
     subscribe(f) { subs.add(f); return () => subs.delete(f); },
+    // f(händelse, harSession) – låter appen reagera på utloggning och på att sessionen kommer tillbaka
+    onAuthChange(f) { onAuth = f; },
+    // Finns en sparad session kvar i webbläsaren? (Supabase tar bort den vid riktig utloggning, men inte vid nätfel.)
+    hasStoredSession() { try { for (let i = 0; i < localStorage.length; i++) if (/^sb-.+-auth-token$/.test(localStorage.key(i))) return true; } catch {} return false; },
     async getAccessToken() { return (await sb.auth.getSession()).data.session?.access_token; },
     async getSession() { return (await sb.auth.getSession()).data.session; },
     async signIn(email, password) { const r = chk(await sb.auth.signInWithPassword({ email, password })); listen(); return r; },

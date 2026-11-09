@@ -5,6 +5,16 @@ const J=(m,s)=>new Response(JSON.stringify({error:m}),{status:s,headers:{'Conten
 const ICS_UA='Mozilla/5.0 (compatible; Familjeskarm/1.1; +https://familjeskarm.rose-and-root-reminders.workers.dev) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36';
 const allowedHost=h=>ALLOWED.some(x=>x.test(h));
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const MAX_ICS=8*1024*1024; // tak för en kalenderfil (även efter uppackning), så att ett jättesvar inte kan fylla Workerns minne
+const tooLarge=()=>Object.assign(new Error('too large'),{name:'TooLarge'});
+async function readCapped(res,max){
+  if(Number(res.headers.get('Content-Length'))>max) throw tooLarge();
+  if(!res.body) return new Uint8Array(0);
+  const reader=res.body.getReader(), chunks=[]; let n=0;
+  for(;;){ const {done,value}=await reader.read(); if(done) break; n+=value.length; if(n>max){ try{ await reader.cancel(); }catch{} throw tooLarge(); } chunks.push(value); }
+  const out=new Uint8Array(n); let o=0; for(const c of chunks){ out.set(c,o); o+=c.length; } return out;
+}
+const sha256hex=async s=>[...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)))].map(b=>b.toString(16).padStart(2,'0')).join('');
 // Hämtar med egna redirects (bara inom tillåtna värdar), timeout och omförsök med backoff vid nätverksfel/5xx/429.
 async function fetchIcs(src){
   let last='';
@@ -19,16 +29,20 @@ async function fetchIcs(src){
         url=new URL(loc,url); if(url.protocol!=='https:'||!allowedHost(url.hostname)) return {status:403,error:'redirect to '+url.hostname+' not allowed'};
       }
       if(!up.ok){ last='upstream '+up.status; if(up.status>=500||up.status===429||up.status===408) continue; return {status:up.status===404||up.status===410?404:502,error:last,final:true}; }
-      let buf=new Uint8Array(await up.arrayBuffer());
-      if(buf[0]===0x1f&&buf[1]===0x8b) buf=new Uint8Array(await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer());
+      let buf=await readCapped(up,MAX_ICS);
+      if(buf[0]===0x1f&&buf[1]===0x8b) buf=await readCapped(new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))),MAX_ICS);
       const body=new TextDecoder().decode(buf);
       if(!/BEGIN:VCALENDAR/.test(body)){ last='not ics'; continue; }
       return {body};
-    }catch(e){ last=(e&&e.name==='TimeoutError')?'timeout':'network '+(e&&e.name||'error'); }
+    }catch(e){
+      if(e&&e.name==='TooLarge') return {status:502,error:'too large',final:true}; // ingen idé att försöka igen
+      last=(e&&e.name==='TimeoutError')?'timeout':'network '+(e&&e.name||'error');
+    }
   }
   return {status:502,error:last};
 }
 async function ics(req,u,ctx){
+  if(req.method!=='GET') return new Response(null,{status:405,headers:{Allow:'GET'}});
   const auth=req.headers.get('Authorization')||''; const id=u.searchParams.get('id')||'';
   if(!/^Bearer \S+$/.test(auth)) return J('unauthorized',401);
   if(!/^[0-9a-f-]{36}$/i.test(id)) return J('bad id',400);
@@ -40,7 +54,8 @@ async function ics(req,u,ctx){
   if(src.protocol!=='https:'||!allowedHost(src.hostname)) return J('host not allowed',403);
   // Schemakällor (Personalkollen) ändras sällan: 20 min färskt. Allt sparas 7 dygn som reserv (stale-if-error).
   const ttl=/personalkollen\.se$/i.test(src.hostname)?20*60e3:2*60e3;
-  const key=new Request('https://ics-cache.familjeskarm.internal/v3/'+id+'/'+encodeURIComponent(src.toString()).length);
+  // Nyckeln bygger på länkens innehåll (inte dess längd), så en ändrad länk aldrig får den gamla länkens kopia.
+  const key=new Request('https://ics-cache.familjeskarm.internal/v4/'+id+'/'+(await sha256hex(src.toString())).slice(0,32));
   const cache=caches.default; const hit=await cache.match(key);
   const hitAt=hit?Number(hit.headers.get('X-Fetched-At'))||0:0;
   const out=(body,at,extra={})=>new Response(body,{headers:{'Content-Type':'text/calendar; charset=utf-8','Cache-Control':'private, no-store','X-Ics-Fetched-At':String(at),...extra}});
