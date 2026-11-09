@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0f7ff"/>
+      <stop offset="1" stop-color="#fff0f6"/>
+    </linearGradient>
+    <filter id="sh2" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity=".14"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg2)"/>
+  <!-- green calendar (left) -->
+  <g filter="url(#sh2)" transform="translate(48 118) rotate(-12 130 145)">
+    <rect width="260" height="280" rx="52" fill="#22c55e"/>
+    <rect width="260" height="74" rx="52" fill="#16a34a"/>
+    <rect y="44" width="260" height="30" fill="#16a34a"/>
+    <rect x="62" y="-20" width="30" height="56" rx="11" fill="#bbf7d0"/>
+    <rect x="168" y="-20" width="30" height="56" rx="11" fill="#bbf7d0"/>
+    <circle cx="92" cy="150" r="18" fill="#052e16"/>
+    <circle cx="168" cy="150" r="18" fill="#052e16"/>
+    <path d="M104 196 q28 24 56 0" fill="none" stroke="#052e16" stroke-width="12" stroke-linecap="round"/>
+  </g>
+  <!-- blue calendar (right) -->
+  <g filter="url(#sh2)" transform="translate(204 138) rotate(12 130 145)">
+    <rect width="260" height="280" rx="52" fill="#3b82f6"/>
+    <rect width="260" height="74" rx="52" fill="#2563eb"/>
+    <rect y="44" width="260" height="30" fill="#2563eb"/>
+    <rect x="62" y="-20" width="30" height="56" rx="11" fill="#bfdbfe"/>
+    <rect x="168" y="-20" width="30" height="56" rx="11" fill="#bfdbfe"/>
+    <circle cx="92" cy="150" r="18" fill="#0f172a"/>
+    <circle cx="168" cy="150" r="18" fill="#0f172a"/>
+    <path d="M104 196 q28 24 56 0" fill="none" stroke="#0f172a" stroke-width="12" stroke-linecap="round"/>
+  </g>
+  <!-- pink heart badge -->
+  <g transform="translate(256 378)" filter="url(#sh2)">
+    <circle r="58" fill="#fff"/>
+    <path d="M0 20 C0 4 -14 -8 -28 -8 C-40 -8 -46 2 -46 14 C-46 34 -16 48 0 62 C16 48 46 34 46 14 C46 2 40 -8 28 -8 C14 -8 0 4 0 20 Z" fill="#ec4899" transform="translate(0 -16) scale(.78)"/>
+  </g>
+</svg>

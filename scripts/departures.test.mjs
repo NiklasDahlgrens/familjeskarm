@@ -1,0 +1,11 @@
+import vm from 'node:vm';import fs from 'node:fs';import assert from 'node:assert/strict';
+let calls=[], cache=new Map(), tasks=[];
+const ctx=vm.createContext({Response,Request,URL,AbortSignal,Date,console,btoa,caches:{default:{match:async k=>cache.get(k.url)?.clone(),put:async(k,v)=>cache.set(k.url,v)}},fetch:async(url,opts)=>{calls.push([url,opts]);if(url.endsWith('/token'))return Response.json({access_token:'test-only',expires_in:3600});if(url.includes('/locations/'))return Response.json({results:[{gid:'9021000000000000',name:'Lackarebäck, Mölndal',latitude:57.66,longitude:12.01}]});return Response.json({results:[{plannedTime:'2026-11-09T08:00:00+01:00',estimatedTime:'2026-11-09T08:03:00+01:00',stopPoint:{platform:'A'},serviceJourney:{direction:'Test direction',line:{shortName:'4',backgroundColor:'#00ff00',foregroundColor:'#000000'}}}]});}});
+vm.runInContext(fs.readFileSync('scripts/worker-api.js','utf8'),ctx);
+const call=env=>{ctx.env=env;ctx.req=new Request('https://example.test/api/departures');ctx.context={waitUntil:p=>tasks.push(p)};return vm.runInContext('departures(req,env,context)',ctx);};
+assert.equal((await (await call({})).json()).status,'unconfigured');assert.equal(calls.length,0);
+const env={VASTTRAFIK_CLIENT_ID:'test-client',VASTTRAFIK_CLIENT_SECRET:'test-secret'};
+let d=await (await call(env)).json();await Promise.all(tasks);assert.equal(d.status,'ok');assert.equal(d.departures[0].line,'4');assert.equal(d.departures[0].platform,'A');assert.equal(d.departures[0].estimated,'2026-11-09T08:03:00+01:00');assert.equal(calls.length,3);
+await call(env);assert.equal(calls.length,3);cache.clear();await call(env);assert.equal(calls.length,4);assert.equal(calls.filter(x=>x[0].endsWith('/token')).length,1);assert.ok(!calls.at(-1)[0].includes('platforms='));
+assert.equal((await(await call({...env,VASTTRAFIK_STOP_GID:'wrong'})).json()).status,'unavailable');
+console.log('PASS: missing secrets, OAuth, stop discovery, all platforms, normalization, 30s cache, token/stop reuse, invalid override');

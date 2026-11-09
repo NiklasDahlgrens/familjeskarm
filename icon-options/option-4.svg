@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img">
+  <defs>
+    <linearGradient id="bg4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe8d6"/>
+      <stop offset="1" stop-color="#ffc2d4"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#bfdbfe"/>
+      <stop offset="1" stop-color="#fce7f3"/>
+    </linearGradient>
+    <filter id="sh4" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000" flood-opacity=".16"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg4)"/>
+  <!-- window frame -->
+  <g filter="url(#sh4)">
+    <rect x="78" y="78" width="356" height="356" rx="44" fill="#fff"/>
+    <rect x="104" y="104" width="304" height="260" rx="28" fill="url(#sky)"/>
+    <!-- sill -->
+    <rect x="78" y="360" width="356" height="74" rx="28" fill="#fff"/>
+    <rect x="78" y="360" width="356" height="28" fill="#ffe4e6"/>
+  </g>
+  <!-- window cross -->
+  <rect x="248" y="104" width="16" height="260" fill="#fff" opacity=".85"/>
+  <rect x="104" y="222" width="304" height="16" fill="#fff" opacity=".85"/>
+  <!-- two characters on sill -->
+  <g filter="url(#sh4)">
+    <!-- Hubby -->
+    <circle cx="190" cy="330" r="54" fill="#22c55e"/>
+    <circle cx="172" cy="320" r="8" fill="#052e16"/>
+    <circle cx="204" cy="320" r="8" fill="#052e16"/>
+    <path d="M178 342 q12 10 24 0" fill="none" stroke="#052e16" stroke-width="6" stroke-linecap="round"/>
+    <!-- body hint -->
+    <ellipse cx="190" cy="392" rx="42" ry="28" fill="#16a34a"/>
+    <!-- Wifey -->
+    <circle cx="322" cy="330" r="54" fill="#3b82f6"/>
+    <circle cx="304" cy="320" r="8" fill="#0f172a"/>
+    <circle cx="336" cy="320" r="8" fill="#0f172a"/>
+    <path d="M310 342 q12 10 24 0" fill="none" stroke="#0f172a" stroke-width="6" stroke-linecap="round"/>
+    <ellipse cx="322" cy="392" rx="42" ry="28" fill="#2563eb"/>
+  </g>
+  <!-- pink heart between them -->
+  <g transform="translate(256 288)">
+    <path d="M0 14 C0 2 -10 -6 -20 -6 C-28 -6 -34 0 -34 8 C-34 22 -12 32 0 42 C12 32 34 22 34 8 C34 0 28 -6 20 -6 C10 -6 0 2 0 14 Z" fill="#ec4899" transform="translate(0 -10) scale(.9)"/>
+  </g>
+  <!-- tiny stars in sky -->
+  <circle cx="150" cy="150" r="6" fill="#fff" opacity=".9"/>
+  <circle cx="360" cy="160" r="5" fill="#fff" opacity=".9"/>
+  <circle cx="300" cy="130" r="4" fill="#f472b6" opacity=".8"/>
+</svg>

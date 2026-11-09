@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="sv"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f6f2ec" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b0f17" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f2ec">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Familjens kalender, att göra, väder, avgångar, matsedel och inköpslista.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Familjen">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<title>Familjeskärmen</title>
+<style>html{background:#f6f2ec}html[data-theme=dark]{background:#0b0f17}</style>
+<script>(function(){try{var p=localStorage.getItem('fs-theme')||'auto',h=+new Date().toLocaleString('sv-SE',{hour:'2-digit',hour12:false,timeZone:'Europe/Stockholm'});var d=p==='dark'||(p==='auto'&&(h>=21||h<6));document.documentElement.dataset.theme=d?'dark':'light';}catch(e){}})();</script></head>
+<body><div id="app"></div><script type="module" src="/src/main.js"></script></body></html>

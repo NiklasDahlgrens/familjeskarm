@@ -1,0 +1,13 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: '/usr/bin/google-chrome', args: ['--no-sandbox'] });
+const p = await (await b.newContext({ viewport:{width:1340,height:800}, locale:'sv-SE', timezoneId:'Europe/Stockholm' })).newPage();
+const logs=[]; p.on('console', m => logs.push(m.type()+': '+m.text())); p.on('pageerror', e => logs.push('pageerror: '+e.message));
+p.on('response', r => { if (r.url().includes('/api/ics')) logs.push('ics '+r.status()); });
+await p.goto('https://familjeskarm.rose-and-root-reminders.workers.dev/'); await p.waitForSelector('#lf');
+await p.fill('[name=email]', process.env.FAMILJESKARM_EMAIL); await p.fill('[name=password]', process.env.FAMILJESKARM_PASSWORD);
+await p.click('#lf button'); await p.waitForTimeout(6000);
+if (await p.locator('#night').isVisible()) await p.click('#night');
+await p.screenshot({ path: '/workspace/check1.png' }); await p.click('[data-view=kalender]'); await p.click('.nav-next, [data-act=next], button[aria-label*=ästa]').catch(()=>{}); await p.waitForTimeout(800); await p.screenshot({ path: '/workspace/check2.png' });
+console.log(logs.join('\n'));
+console.log(JSON.stringify(await p.evaluate(()=>document.body.innerText.slice(0,800))));
+await b.close();

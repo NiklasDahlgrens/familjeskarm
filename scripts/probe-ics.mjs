@@ -1,0 +1,11 @@
+import { chromium } from 'playwright-core';
+const b = await chromium.launch({ executablePath: '/usr/bin/google-chrome', args: ['--no-sandbox'] });
+const p = await (await b.newContext({ viewport:{width:1340,height:800}, locale:'sv-SE', timezoneId:'Europe/Stockholm' })).newPage();
+const out=[];
+p.on('response', async r => { if (r.url().includes('/api/ics')) { const id=new URL(r.url()).searchParams.get('id'); let t=''; try{ t=(await r.text()).slice(0,120).replace(/\s+/g,' ') }catch{} out.push(`${id.slice(0,8)} ${r.status()} ${r.headers()['x-ics-cache']||''} ${t.startsWith('BEGIN')?'ICS':t}`); } });
+await p.goto('https://familjeskarm.rose-and-root-reminders.workers.dev/'); await p.waitForSelector('#lf');
+await p.fill('[name=email]', process.env.FAMILJESKARM_EMAIL); await p.fill('[name=password]', process.env.FAMILJESKARM_PASSWORD);
+await p.click('#lf button'); await p.waitForTimeout(12000);
+console.log(out.join('\n'));
+console.log(JSON.stringify(await p.evaluate(()=>[...document.querySelectorAll('.feed-warn,[class*=warn]')].map(e=>e.innerText).join(' | '))));
+await b.close();

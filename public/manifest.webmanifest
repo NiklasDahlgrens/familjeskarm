@@ -1,0 +1,22 @@
+{
+  "id": "/",
+  "name": "Familjeskärmen",
+  "short_name": "Familjen",
+  "description": "Familjens kalender, att göra, väder, avgångar, matsedel och inköpslista – hemma på plattan.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["fullscreen", "standalone"],
+  "orientation": "any",
+  "background_color": "#f6f2ec",
+  "theme_color": "#f6f2ec",
+  "lang": "sv",
+  "dir": "ltr",
+  "categories": ["productivity", "lifestyle"],
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
