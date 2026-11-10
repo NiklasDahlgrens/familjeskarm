@@ -3,11 +3,43 @@ import { createClient } from '@supabase/supabase-js';
 const CACHE = 'familjeskarm:cache:';
 const PAGE = 1000; // PostgREST svarar som standard med högst 1000 rader per anrop
 const TIMEOUT_MS = 20000;
+
+// Tolkar både implicit-hash (#access_token&type=recovery) och PKCE (?code=).
+export function authCallbackParams(href) {
+  const u = new URL(href, 'http://local');
+  const all = new URLSearchParams(u.search);
+  for (const [k, v] of new URLSearchParams((u.hash || '').replace(/^#/, ''))) all.set(k, v);
+  return all;
+}
+export function flowTypeFromHref(href) {
+  try { const p = authCallbackParams(href); if (p.get('code') && !p.get('access_token')) return 'pkce'; } catch {}
+  return 'implicit';
+}
+export function isRecoveryRedirect(href) {
+  try { return authCallbackParams(href).get('type') === 'recovery'; } catch { return false; }
+}
+export function redirectAuthError(href) {
+  try {
+    const p = authCallbackParams(href);
+    if (p.get('error') || p.get('error_code') || p.get('error_description')) {
+      return { error: p.get('error'), code: p.get('error_code'), description: (p.get('error_description') || '').replace(/\+/g, ' ') };
+    }
+  } catch {}
+  return null;
+}
+
 export function createSupabaseStore({ supabaseUrl, supabaseAnonKey }) {
   // Utan timeout kan ett hängande anrop på dåligt wifi låsa all vidare uppdatering.
   const timedFetch = (u, o = {}) => fetch(u, { ...o, signal: o.signal ?? AbortSignal.timeout?.(TIMEOUT_MS) });
-  const sb = createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true }, global: { fetch: timedFetch } });
+  const startHref = typeof location !== 'undefined' ? location.href : '';
+  const sb = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: flowTypeFromHref(startHref) },
+    global: { fetch: timedFetch },
+  });
   const subs = new Set(); let ch, onAuth = () => {};
+  // Fånga type=recovery/fel i URL:en nu, innan supabase-js rensar hashen efter inläsning.
+  let recovering = isRecoveryRedirect(startHref);
+  const startAuthError = redirectAuthError(startHref);
   // emit(tabell) = bara den tabellen har ändrats; emit() = ladda om allt
   const emit = t => subs.forEach(f => f(typeof t === 'string' ? t : undefined));
   const chk = ({ data, error }) => { if (error) throw error; return data; };
@@ -16,6 +48,7 @@ export function createSupabaseStore({ supabaseUrl, supabaseAnonKey }) {
     ch = sb.channel('familj').on('postgres_changes', { event: '*', schema: 'public' }, p => emit(p.table)).subscribe();
   }
   sb.auth.onAuthStateChange((ev, s) => {
+    if (ev === 'PASSWORD_RECOVERY') recovering = true;
     if (s) listen(); if (ev === 'SIGNED_OUT' && ch) { sb.removeChannel(ch); ch = null; }
     setTimeout(() => onAuth(ev, !!s), 0); // aldrig Supabase-anrop direkt i den här callbacken (risk för låsning)
   });
@@ -56,5 +89,18 @@ export function createSupabaseStore({ supabaseUrl, supabaseAnonKey }) {
     async getSession() { return (await sb.auth.getSession()).data.session; },
     async signIn(email, password) { const r = chk(await sb.auth.signInWithPassword({ email, password })); listen(); return r; },
     async signOut() { await sb.auth.signOut(); Object.keys(localStorage).filter(k => k.startsWith(CACHE)).forEach(k => localStorage.removeItem(k)); },
+    isPasswordRecovery() { return recovering; },
+    authRedirectError() { return startAuthError; },
+    clearPasswordRecovery() { recovering = false; },
+    async resetPassword(email) {
+      const redirectTo = typeof location !== 'undefined' ? location.origin : undefined;
+      const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo });
+      if (error) throw error;
+    },
+    async updatePassword(password) {
+      const r = chk(await sb.auth.updateUser({ password }));
+      recovering = false;
+      return r;
+    },
   };
 }

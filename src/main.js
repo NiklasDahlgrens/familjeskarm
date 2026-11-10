@@ -1164,7 +1164,17 @@ function toast(m, bad = false, action = null) {
 
 // ---------- start / inloggning
 let booting = false;
+function recoveryErrorText(err) {
+  const code = err?.code || err?.error_code || '';
+  const m = (err?.message || err?.description || err?.error_description || String(err || '')).replace(/\+/g, ' ');
+  if (/otp_expired|expired|invalid.*link|session missing|not authenticated|access_denied/i.test(m + ' ' + code)) return 'Länken har gått ut, begär en ny';
+  if (/same password|should be different/i.test(m)) return 'Välj ett annat lösenord än det gamla';
+  if (!navigator.onLine) return 'Ingen internetanslutning';
+  return m ? 'Kunde inte byta lösenord: ' + m : 'Kunde inte byta lösenord';
+}
 async function boot() {
+  if (store.isPasswordRecovery?.()) return recoveryScreen();
+  if (store.authRedirectError?.()) return loginScreen(recoveryErrorText(store.authRedirectError()));
   if (booting || $('#main')) return; booting = true; // kan anropas från flera håll (start, inloggning, återfådd session)
   try {
     // Ingen giltig session men en sparad finns kvar = förnyelsen föll på nätet (t.ex. start efter strömavbrott).
@@ -1174,18 +1184,75 @@ async function boot() {
   } finally { booting = false; }
 }
 store.onAuthChange?.((ev, has) => {
-  if (ev === 'SIGNED_OUT') { if ($('#main')) loginScreen('Du har loggats ut – logga in igen.'); return; } // annars visas gammal data i det tysta
+  if (ev === 'PASSWORD_RECOVERY') { booting = false; recoveryScreen(); return; }
+  if (ev === 'SIGNED_OUT') { if ($('#main') || $('#rf')) loginScreen('Du har loggats ut – logga in igen.'); return; } // annars visas gammal data i det tysta
+  if (store.isPasswordRecovery?.()) return; // stanna på återställningsskärmen tills lösenordet är bytt
   if (!has || (ev !== 'SIGNED_IN' && ev !== 'TOKEN_REFRESHED')) return;
-  if ($('#lf')) boot(); else if (Date.now() - lastRefresh > 30e3) refresh();
+  if ($('#lf') || $('#ff')) boot(); else if (Date.now() - lastRefresh > 30e3) refresh();
 });
 function loginScreen(msg = '') {
   clearInterval(tickTimer); wakeLock?.release().catch(() => {});
   $('#app').innerHTML = `<div class="login"><form class="login-card" id="lf">${logo()}<h1>Familjeskärmen</h1>
     <p class="muted">Logga in med hushållets konto</p>${field('E-post', '<input name="email" type="email" autocomplete="username" inputmode="email" required>')}
     ${field('Lösenord', '<input name="password" type="password" autocomplete="current-password" required>')}
-    <button class="primary big">Logga in</button><p class="err" role="alert">${esc(msg)}</p></form></div>`;
+    <button class="primary big">Logga in</button>
+    <button type="button" class="text-link" id="forgot">Glömt lösenord?</button>
+    <p class="err" role="alert">${esc(msg)}</p></form></div>`;
+  $('#forgot').onclick = () => forgotScreen($('#lf [name=email]')?.value || '');
   $('#lf').onsubmit = async e => { e.preventDefault(); const v = Object.fromEntries(new FormData(e.target)); const b = $('#lf .primary'); b.disabled = true; b.textContent = 'Loggar in…';
     try { await store.signIn(v.email.trim(), v.password); boot(); } catch (err) { loginScreen(/invalid/i.test(err.message) ? 'Fel e-post eller lösenord' : !navigator.onLine ? 'Ingen internetanslutning' : 'Kunde inte logga in: ' + err.message); } };
+}
+function forgotScreen(email = '', msg = '') {
+  clearInterval(tickTimer); wakeLock?.release().catch(() => {});
+  $('#app').innerHTML = `<div class="login"><form class="login-card" id="ff">${logo()}<h1>Glömt lösenord?</h1>
+    <p class="muted">Skriv din e-post, så skickar vi en länk för att välja ett nytt lösenord.</p>
+    ${field('E-post', `<input name="email" type="email" autocomplete="username" inputmode="email" value="${esc(email)}" required>`)}
+    <button class="primary big">Skicka länk</button>
+    <button type="button" class="text-link" id="backLogin">Tillbaka till inloggningen</button>
+    <p class="ok" id="fok" hidden>Kolla din mejl för en länk</p>
+    <p class="err" role="alert">${esc(msg)}</p></form></div>`;
+  $('#backLogin').onclick = () => loginScreen();
+  $('#ff').onsubmit = async e => {
+    e.preventDefault();
+    const v = Object.fromEntries(new FormData(e.target));
+    const mail = (v.email || '').trim();
+    const b = $('#ff .primary'); const er = $('#ff .err'); const ok = $('#fok');
+    b.disabled = true; b.textContent = 'Skickar…'; er.textContent = ''; ok.hidden = true;
+    try {
+      if (store.resetPassword) await store.resetPassword(mail);
+      ok.hidden = false;
+    } catch (err) {
+      // Visa samma bekräftelse även om adressen saknas, så att vi inte avslöjar om kontot finns.
+      if (/not found|does not exist|user not|unable to (find|validate)|signup/i.test(err?.message || '')) ok.hidden = false;
+      else { er.textContent = !navigator.onLine ? 'Ingen internetanslutning' : 'Kunde inte skicka länken just nu. Försök igen om en stund.'; }
+    }
+    b.disabled = false; b.textContent = 'Skicka länk';
+  };
+}
+function recoveryScreen(msg = '') {
+  clearInterval(tickTimer); wakeLock?.release().catch(() => {});
+  const start = msg || (store.authRedirectError?.() ? recoveryErrorText(store.authRedirectError()) : '');
+  $('#app').innerHTML = `<div class="login"><form class="login-card" id="rf">${logo()}<h1>Välj nytt lösenord</h1>
+    <p class="muted">Välj ett lösenord med minst 8 tecken.</p>
+    ${field('Nytt lösenord', '<input name="password" type="password" autocomplete="new-password" minlength="8" required>')}
+    ${field('Upprepa lösenord', '<input name="repeat" type="password" autocomplete="new-password" minlength="8" required>')}
+    <button class="primary big">Spara lösenord</button>
+    <button type="button" class="text-link" id="needNew">Behöver du en ny länk?</button>
+    <p class="err" role="alert">${esc(start)}</p></form></div>`;
+  $('#needNew').onclick = () => { store.clearPasswordRecovery?.(); forgotScreen(); };
+  $('#rf').onsubmit = async e => {
+    e.preventDefault();
+    const v = Object.fromEntries(new FormData(e.target));
+    const er = $('#rf .err');
+    if ((v.password || '').length < 8) { er.textContent = 'Lösenordet måste vara minst 8 tecken.'; return; }
+    if (v.password !== v.repeat) { er.textContent = 'Lösenorden är inte lika.'; return; }
+    const b = $('#rf .primary'); b.disabled = true; b.textContent = 'Sparar…';
+    try {
+      await store.updatePassword(v.password);
+      toast('Lösenordet är bytt 💕');
+      boot();
+    } catch (err) { er.textContent = recoveryErrorText(err); b.disabled = false; b.textContent = 'Spara lösenord'; }
+  };
 }
 boot();
 

@@ -24,7 +24,7 @@ globalThis.fetch = async (url, opts = {}) => {
   return json({ message: 'okänd väg ' + u.pathname }, {}, 404);
 };
 
-const { createSupabaseStore } = await import('../src/data/supabase.js');
+const { createSupabaseStore, authCallbackParams, isRecoveryRedirect, redirectAuthError, flowTypeFromHref } = await import('../src/data/supabase.js');
 const store = createSupabaseStore({ supabaseUrl: 'https://test.supabase.co', supabaseAnonKey: 'sb_publishable_test' });
 const seen = []; store.subscribe(t => seen.push(t));
 let n = 0; const test = async (name, fn) => { calls.length = 0; seen.length = 0; await fn(); n++; console.log('ok  ' + name); };
@@ -65,6 +65,22 @@ await test('clear tömmer en tabell i ett enda anrop', async () => {
 await test('utan sparad session rapporteras ingen', async () => {
   assert.equal(store.hasStoredSession(), false);
   localStorage.setItem('sb-test-auth-token', '{}'); assert.equal(store.hasStoredSession(), true); localStorage.removeItem('sb-test-auth-token');
+});
+
+await test('känner igen återställningslänk i hash och PKCE-kod i query', () => {
+  assert.equal(isRecoveryRedirect('https://app.example/#access_token=x&type=recovery'), true);
+  assert.equal(isRecoveryRedirect('https://app.example/?type=recovery&code=abc'), true);
+  assert.equal(isRecoveryRedirect('https://app.example/#access_token=x&type=signup'), false);
+  assert.equal(flowTypeFromHref('https://app.example/?code=abc'), 'pkce');
+  assert.equal(flowTypeFromHref('https://app.example/#access_token=x&type=recovery'), 'implicit');
+  assert.equal(authCallbackParams('https://app.example/#type=recovery').get('type'), 'recovery');
+});
+
+await test('utgången återställningslänk ger ett läsbart fel', () => {
+  const e = redirectAuthError('https://app.example/#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired&type=recovery');
+  assert.equal(e.code, 'otp_expired');
+  assert.match(e.description, /expired/i);
+  assert.equal(isRecoveryRedirect('https://app.example/#error=access_denied&error_code=otp_expired&type=recovery'), true);
 });
 
 console.log(`PASS: ${n} tester`);
