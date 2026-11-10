@@ -9,6 +9,7 @@ npm install
 npm run dev        # utveckling
 npm run build      # produktionsbygge i dist/ (med service worker för offline)
 npm run preview
+npm test           # kalendertolkning (inkl. kantfall) och Workerns API, utan nätverk
 ```
 Första gången visas **exempeldata** (märkt "Exempeldata" i sidhuvudet). Rensa via ⚙️ > *Rensa all data*.
 
@@ -26,11 +27,13 @@ och är redan installerat. Databasen är tom från början.
    kryssa i **Auto Confirm User**, klicka *Create user*.
 3. **SQL Editor** → kör (med er e-post):
    ```sql
-   insert into public.household_emails(email) values ('er-epost@exempel.se');
+   insert into public.household_members(user_id)
+     select id from auth.users where lower(email) = lower('er-epost@exempel.se');
    ```
-   Bara e-post i den listan kan se eller ändra data – även om någon annan skulle registrera sig.
-4. Rekommenderat: **Authentication → Sign In / Providers → Email** (eller *User Signups*) → stäng av
-   **Allow new users to sign up**, och spara.
+   Bara konton i den listan kan se eller ändra data – även om någon annan skulle registrera sig.
+   (Äldre installationer använde `household_emails`; avsnitt 004 i `supabase/schema.sql` flyttar över dem.)
+4. **Authentication → Sign In / Providers → Email** (eller *User Signups*) → stäng av
+   **Allow new users to sign up**, och spara. Ingen utanför hushållet behöver kunna skapa konto.
 5. Logga in på plattan och i båda telefonerna med samma konto. Inloggningen sparas.
 
 ## Publicera (gratis statisk hosting)
@@ -55,7 +58,7 @@ npx wrangler deploy scripts/worker.generated.js --name familjeskarm --compatibil
 ## iCloud-kalendrar (endast läsning)
 1. På iPhone: **Kalender → Kalendrar → (i) bredvid kalendern → slå på Offentlig kalender → Dela länk** (kopiera `webcal://…`).
 2. I appen: **⚙️ → Kalendrar** → namn, klistra in länken, välj person → *Lägg till kalender*.
-3. Händelserna visas med 🍎 i kalendern och på Hem, och kan inte ändras i appen. De uppdateras var 15:e minut och när appen öppnas.
+3. Händelserna visas med 🍎 i kalendern och på Hem, och kan inte ändras i appen. Appen frågar Workern var tredje minut och när den öppnas; Workern hämtar från källan högst varannan minut (Personalkollen var 20:e). Är kalendern oförändrad tolkas den inte om.
 
 Länkarna sparas i tabellen `calendar_feeds` (bara hushållet kan läsa dem) och hämtas av Workern via
 `/api/ics?id=…`, som kräver inloggning. Bara iCloud-, Google- och Outlook-värdar tillåts.
@@ -107,3 +110,34 @@ Västtrafik är nu konfigurerat och riktiga avgångar verifierade. Automatiskt i
 - Personalkollen cachas 20 min, övriga 2 min. Senaste lyckade kopian sparas 7 dygn i Cache API och serveras vid fel (`X-Ics-Cache: stale`, `X-Ics-Fetched-At`).
 - Klienten visar en kompakt rad ("… kunde inte uppdateras · Senast hämtade pass visas · Visa detaljer") först när en källa strulat i mer än 30 min, eller direkt om inga pass alls finns att visa.
 - Workers Logs är påslaget; fel loggas som `{"ics":"fail",...}` (utan länkar).
+
+## Granskning och åtgärder (nov 2026)
+Efter en genomgång av säkerhet, kalenderlogik, stabilitet och tillgänglighet. Det som ändrar beteende:
+
+**Kalender**
+- Återkommande händelser: en förekomst som flyttats till en annan vecka visas, och långa serier (över 5000 förekomster) försvinner inte längre.
+- Heldagar räknas på datum, inte klockslag: rätt dag även om telefonen står i en annan tidszon och vid sommartidsskiftet.
+- Tider utan känd tidszon (flytande, eller `TZID` utan `VTIMEZONE`) tolkas i den angivna zonen om den är ett IANA-namn, annars som svensk tid.
+- En ogiltig händelse i ett flöde hoppas över i stället för att fälla hela kalendern.
+- Senaste kopian av varje flöde sparas på enheten (Cache API, `fs-ics`) så att passen finns kvar efter omladdning utan nät. Rensas vid utloggning.
+- Egna händelser får gå över midnatt: en sluttid tidigare än starttiden betyder "slutar dagen efter" och händelsen visas på båda dagarna.
+
+**Väggplattan**
+- En kvarglömd dialog stängs efter 30 min utan beröring (nattetid efter 3 min om inget är osparat), så att nattläge, omritning och nya versioner inte blockeras.
+- Veckan följer med vid veckoskifte även om ingen rör skärmen. Nattklockan tänds först två minuter efter senaste beröring.
+- Snabbfälten i Att göra och Inköp behåller text, fokus och tangentbord när listan uppdateras från en annan enhet. Utfällda "Klara"/"I korgen" förblir utfällda.
+- Utloggning eller tappad session visar inloggningen i stället för gammal data. Startar appen utan nät visas senast sparade data och sessionen förnyas när nätet är tillbaka.
+- Alla anrop har timeout (Supabase 20 s, kalenderflöden 45 s). Tabeller hämtas sidvis (ingen 1000-radersgräns) och bara den tabell som ändrats laddas om.
+
+**Säkerhet**
+- Hushållet knyts till användar-id (`household_members`) i stället för e-postadress – kör avsnitt 004 i `supabase/schema.sql` i SQL Editor, och stäng av registrering av nya konton.
+- Workern skickar `Content-Security-Policy` (skript bara från egen adress, anslutningar bara till Supabase och Open-Meteo), `X-Frame-Options: DENY` och `Referrer-Policy`. Statiska filer svarar bara på GET/HEAD.
+- `/api/ics`: cache-nyckeln bygger på länkens innehåll, och svar över 8 MB (även uppackade) avvisas.
+- "Rensa all data" kräver att man skriver RADERA och gör en radering per tabell.
+
+**Tillgänglighet och touch**
+- Formulärfält har riktiga etiketter; dag-, tid- och personväljare är namngivna grupper med `aria-pressed`.
+- Esc/bakåt stänger först tidväljaren eller månadskalendern, sedan formuläret. Fokus flyttas in i tidväljaren och tillbaka.
+- Mörk text på personfärgerna, tydligare passerade händelser, minst 14 px för informationsbärande text på Hem (surfplatta) och minst 44 px touchytor.
+
+Inte ändrat: viewport-taggen (`interactive-widget=resizes-content` bör provas på plattan först), uppdelning av `src/main.js` i fler moduler och sammanslagning av överlappande CSS-lager.

@@ -18,6 +18,7 @@ export function createLocalStore() {
     async add(t, o) { const r = { id: uid(), created_at: new Date().toISOString(), ...o }; (db[t] ||= []).push(r); save(); return r; },
     async update(t, id, p) { const r = db[t].find(x => x.id === id); if (r) Object.assign(r, p); save(); return r; },
     async remove(t, id) { db[t] = db[t].filter(x => x.id !== id); save(); },
+    async clear(t) { db[t] = []; save(); },
     subscribe(f) { subs.add(f); return () => subs.delete(f); },
     async reset() { db = seedData(); save(); },
   };

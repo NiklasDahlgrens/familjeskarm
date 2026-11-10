@@ -1,9 +1,9 @@
 // Väder för Mölndal från Open-Meteo (gratis, ingen nyckel, CORS öppet). Cachas i localStorage.
 const LAT = 57.665, LON = 12.012, PLACE = 'Mölndal';
 const URL_ = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}`
-  + '&current=temperature_2m,apparent_temperature,is_day,weather_code,wind_speed_10m,wind_gusts_10m,precipitation'
-  + '&hourly=temperature_2m,weather_code,precipitation_probability,precipitation,is_day'
-  + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max'
+  + '&current=temperature_2m,is_day,weather_code,wind_speed_10m'
+  + '&hourly=temperature_2m,weather_code,precipitation_probability,is_day'
+  + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum'
   + '&wind_speed_unit=ms&timezone=Europe%2FStockholm&forecast_days=8';
 const KEY = 'fs-wx:v2';
 let wx = null; try { wx = JSON.parse(localStorage.getItem(KEY)); } catch {}

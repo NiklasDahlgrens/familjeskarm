@@ -1,6 +1,7 @@
 -- Familjeskärm – Supabase-schema
--- Modell: en delad hushållsinloggning. Bara e-post som finns i household_emails
--- får läsa/skriva (skydd även om publik registrering är påslagen).
+-- Modell: en delad hushållsinloggning. Bara konton som finns i household_members
+-- (se 004 längst ner) får läsa/skriva – även om publik registrering skulle vara påslagen.
+-- Stäng ändå av registrering: Authentication → Sign In / Providers → "Allow new users to sign up".
 
 create table if not exists public.events (
   id uuid primary key default gen_random_uuid(),
@@ -79,3 +80,30 @@ drop policy if exists household_all on public.calendar_feeds;
 create policy household_all on public.calendar_feeds for all to authenticated using ((select public.is_household())) with check ((select public.is_household()));
 do $$ begin if not exists (select 1 from pg_publication_tables where pubname='supabase_realtime' and tablename='calendar_feeds') then
   alter publication supabase_realtime add table public.calendar_feeds; end if; end $$;
+
+-- 004: knyt hushållet till användar-id i stället för e-postadress
+-- En e-postadress i en lista är bara så säker som kontot bakom den: en adress utan konto kan registreras av den som
+-- kontrollerar adressen. Ett användar-id kan däremot bara tillhöra ett konto som redan finns.
+-- Säkert att köra på en befintlig installation: konton som matchar household_emails flyttas över först,
+-- så ingen som har åtkomst i dag tappar den.
+create table if not exists public.household_members (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  added_at timestamptz not null default now()
+);
+alter table public.household_members enable row level security;
+revoke all on public.household_members from anon, authenticated;
+
+insert into public.household_members(user_id)
+  select u.id from auth.users u join public.household_emails h on lower(h.email) = lower(u.email)
+  on conflict do nothing;
+
+create or replace function public.is_household() returns boolean
+language sql stable security definer set search_path = '' as
+$$ select exists (select 1 from public.household_members m where m.user_id = (select auth.uid())) $$;
+revoke all on function public.is_household() from public, anon;
+grant execute on function public.is_household() to authenticated;
+
+-- Lägg till ett konto i hushållet (kör i SQL Editor, med kontots e-post):
+-- insert into public.household_members(user_id) select id from auth.users where lower(email) = lower('familj@example.com');
+-- household_emails används inte längre av policyerna och kan tas bort när ni ser att inloggningen fungerar:
+-- drop table public.household_emails;

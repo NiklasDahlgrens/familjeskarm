@@ -2,21 +2,21 @@ import './fonts.css';
 import './style.css';
 import './dashboard.css';
 import { store } from './data/index.js';
-import { mondayOf } from './data/seed.js';
-import { loadFeed, expand, forgetFeed, feedKind } from './feeds.js';
+import { TZ, pad2, iso, addDays, todayIso, nowHM, mondayOf, thisMonday } from './time.js';
+import { loadFeed, expand, forgetFeed, forgetAllFeeds, feedKind } from './feeds.js';
 import { icon } from './icons.js';
 import { weather, loadWeather, wxIcon, wxText, deg, num, weatherPlace } from './weather.js';
 
 import { transit, loadTransit } from './transit.js';
 
-const TZ = 'Europe/Stockholm';
 // Fasta färger per person (styrs av CSS-klasserna p-niklas/p-sambo/p-gemensamt)
 const P = { niklas: 'Hubby', sambo: 'Wifey', gemensamt: 'Gemensamt' };
 const DAYS = ['Måndag', 'Tisdag', 'Onsdag', 'Torsdag', 'Fredag', 'Lördag', 'Söndag'];
-const iso = d => d.toLocaleDateString('sv-SE');
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const esc =s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const $ = (s, r = document) => r.querySelector(s);
-const S = { view: 'hem', week: mondayOf(new Date()), data: {}, loaded: false, filter: new Set(Object.keys(P)), feeds: [], feedErr: [], feedStatus: {}, feedsLoading: false, showPast: false };
+// open = vilka <details> som är utfällda (data-keep), så att de överlever omritningar
+const S = { view: 'hem', week: thisMonday(), data: {}, loaded: false, filter: new Set(Object.keys(P)), feeds: [], feedErr: [], feedStatus: {}, feedsLoading: false, showPast: false, open: new Set() };
+const keepOpen = k => `data-keep="${k}"${S.open.has(k) ? ' open' : ''}`;
 const VIEWS = [['hem', 'home', 'Hem'], ['kalender', 'calendar', 'Kalender'], ['todo', 'checksq', 'Att göra'], ['matsedel', 'meal', 'Matsedel'], ['recept', 'book', 'Recept'], ['inkop', 'cart', 'Inköp']];
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const isPhone = () => matchMedia('(max-width: 820px)').matches;
@@ -25,7 +25,7 @@ const srcIcon = e => e.readonly ? icon((SRC[e.src] || SRC.other)[0], 'ro-i') : '
 const ingr = r => r?.ingredients || [], stepsOf = r => r?.steps || [];
 
 // ---------- tema: ljus / mörk / auto (mörk 21–06)
-const nightNow = () => { const h = +new Date().toLocaleString('sv-SE', { hour: '2-digit', hour12: false, timeZone: TZ }); return h >= 21 || h < 6; };
+const nightNow = () => { const h = +nowHM().slice(0, 2); return h >= 21 || h < 6; };
 const themePref = () => localStorage.getItem('fs-theme') || 'auto';
 const THEME_TXT = { auto: 'Tema: automatiskt (mörkt 21–06)', dark: 'Tema: mörkt', light: 'Tema: ljust' };
 function applyTheme() {
@@ -37,31 +37,39 @@ function applyTheme() {
 applyTheme();
 
 // ---------- data
-let feedSig = null, refreshing = null, again = false;
-async function refresh() {
+const ALL_TABLES = ['events', 'todos', 'recipes', 'meal_plan', 'shopping_items', 'calendar_feeds'];
+let feedSig = null, refreshing = null, queued = null;
+// refresh() laddar om allt; refresh(['todos']) bara de tabeller som faktiskt ändrats.
+async function refresh(tables) {
   if (!document.getElementById('main')) return;
-  if (refreshing) { again = true; return refreshing; } // slå ihop samtidiga anrop, men kör en gång till efteråt
+  const all = !Array.isArray(tables) || !S.loaded;
+  const want = all ? ALL_TABLES : ALL_TABLES.filter(t => tables.includes(t));
+  if (refreshing) { queued = queued === 'all' || all ? 'all' : [...new Set([...(queued || []), ...want])]; return refreshing; } // slå ihop samtidiga anrop, men kör en gång till efteråt
+  if (!want.length) return;
   refreshing = (async () => {
-    const ts = ['events', 'todos', 'recipes', 'meal_plan', 'shopping_items', 'calendar_feeds'];
-    const v = await Promise.all(ts.map(t => store.list(t))); ts.forEach((t, i) => S.data[t] = v[i] || []);
-    S.loaded = true; lastRefresh = Date.now(); lastNightMinute = ''; render(false);
+    const v = await Promise.all(want.map(t => store.list(t))); want.forEach((t, i) => S.data[t] = v[i] || []);
+    S.loaded = true; if (all) lastRefresh = Date.now(); lastNightMinute = ''; render(false);
     const sig = (S.data.calendar_feeds || []).map(f => f.id + f.url + f.person + f.name).sort().join('|');
     if (sig !== feedSig) { feedSig = sig; loadFeeds(true); }
   })();
   try { await refreshing; } finally { refreshing = null; }
-  if (again) { again = false; return refresh(); }
+  if (queued) { const q = queued; queued = null; return refresh(q === 'all' ? undefined : q); }
 }
-let lastRefresh = 0, refreshTimer;
-store.subscribe(() => { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 120); });
+let lastRefresh = 0, refreshTimer, dirtyAll = false; const dirty = new Set();
+store.subscribe(t => {
+  if (t) dirty.add(t); else dirtyAll = true;
+  clearTimeout(refreshTimer); refreshTimer = setTimeout(() => { const ts = dirtyAll ? undefined : [...dirty]; dirtyAll = false; dirty.clear(); refresh(ts); }, 120);
+});
 
 // ---------- prenumererade kalendrar (endast läsning)
 let feedMemo = {}, lastFeedLoad = 0, roIndex = new Map();
 const FEED_WARN_MS = 30 * 60e3;
 async function loadFeeds(force = false) {
   if (!store.getAccessToken || S.feedsLoading) return;
-  const token = await store.getAccessToken(); if (!token) return;
-  S.feedsLoading = true; if (S.view === 'kalender') render(false);
+  S.feedsLoading = true; // sätts före första await så att två anrop i rad inte startar var sin hämtning
   try {
+    const token = await store.getAccessToken(); if (!token) return;
+    if (S.view === 'kalender') render(false);
     const list = (S.data.calendar_feeds && S.data.calendar_feeds.length) ? S.data.calendar_feeds : await store.list('calendar_feeds');
     const prev = new Map(S.feeds.map(x => [x.feed.id, x])); const err = [], feeds = [], status = {};
     await Promise.all(list.map(async f => {
@@ -74,7 +82,10 @@ async function loadFeeds(force = false) {
     }));
     // Visa bara varning när en kalender strulat i över 30 min, eller om vi saknar pass helt för den
     for (const [id, st] of Object.entries(status)) if ((!st.ok || st.stale) && (Date.now() - st.since > FEED_WARN_MS || (!st.ok && !st.hasData))) err.push(st.msg);
-    lastNightMinute = ''; S.feeds = feeds; S.feedErr = err; S.feedStatus = status; feedMemo = {}; lastFeedLoad = Date.now();
+    // Tolkningen återanvänds när en kalender är oförändrad; då behöver veckorna inte räknas om.
+    const changed = feeds.length !== S.feeds.length || feeds.some(x => { const o = prev.get(x.feed.id); return !o || o.events !== x.events || o.feed.person !== x.feed.person || o.feed.name !== x.feed.name || o.feed.url !== x.feed.url; });
+    lastNightMinute = ''; S.feeds = feeds; S.feedErr = err; S.feedStatus = status; lastFeedLoad = Date.now();
+    if (changed) { feedMemo = {}; roIndex.clear(); }
   } finally { S.feedsLoading = false; }
   if (!$('#dlg')?.open) render(false); else updateFeedStatusUi();
 }
@@ -87,7 +98,17 @@ function feedEvents(date) {
 }
 const endKey = e => e.span === 'first' || e.span === 'mid' ? '24:00' : e.end === '00:00' && e.start ? '24:00' : (e.end || e.start);
 const byTime = (a, b) => (a.start || '').localeCompare(b.start || '') || endKey(a).localeCompare(endKey(b)) || a.title.localeCompare(b.title, 'sv');
-const eventsOn = (date, filtered = false) => [...(S.data.events || []).filter(e => e.date === date), ...feedEvents(date)]
+// Egna händelser där sluttiden är tidigare än starttiden slutar dagen efter och visas på båda dagarna (som delade ICS-händelser).
+const overnight = e => !!(e.start && e.end && e.end < e.start);
+function localEvents(date) {
+  const prev = addDays(date, -1), out = [];
+  for (const e of S.data.events || []) {
+    if (e.date === date) out.push(overnight(e) ? { ...e, span: 'first', end: '', s0: e.start, e1: e.end } : e);
+    else if (e.date === prev && overnight(e)) out.push({ ...e, date, span: 'last', start: '00:00', s0: e.start, e1: e.end });
+  }
+  return out;
+}
+const eventsOn = (date, filtered = false) => [...localEvents(date), ...feedEvents(date)]
   .filter(e => !filtered || S.filter.has(e.person)).sort(byTime);
 // Uppdatera kalendrar var 3:e minut och när skärmen/appen visas igen; databasen som reserv om realtid tappats
 setInterval(() => loadFeeds(true), 3 * 60e3);
@@ -101,9 +122,10 @@ document.addEventListener('visibilitychange', onShow); addEventListener('focus',
 addEventListener('online', () => { renderNet(); refresh(); loadFeeds(true); }); addEventListener('offline', () => renderNet());
 
 // ---------- hjälpare
-const nowHM = () => new Date().toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit', timeZone: TZ });
-const todayIso = () => new Date().toLocaleDateString('sv-SE', { timeZone: TZ });
-const addDays = (ds, n) => { const d = new Date(ds + 'T12:00'); d.setDate(d.getDate() + n); return iso(d); };
+const fLongDate = new Intl.DateTimeFormat('sv-SE', { weekday: 'long', day: 'numeric', month: 'long', timeZone: TZ });
+const fWeekday = new Intl.DateTimeFormat('sv-SE', { weekday: 'long', timeZone: TZ });
+const fDayMonth = new Intl.DateTimeFormat('sv-SE', { day: 'numeric', month: 'long', timeZone: TZ });
+const fClock = new Intl.DateTimeFormat('sv-SE', { hour: '2-digit', minute: '2-digit', timeZone: TZ });
 const weekNo = d => { const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())); t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7)); return Math.ceil(((t - Date.UTC(t.getUTCFullYear(), 0, 1)) / 864e5 + 1) / 7); };
 const cap = s => { if (!s) return s; const g = graphemes(s); return (g[0] || '').toLocaleUpperCase('sv-SE') + g.slice(1).join(''); };
 const greeting = () => { const h = +nowHM().slice(0, 2); return h < 5 ? 'God natt' : h < 10 ? 'God morgon' : h < 13 ? 'God förmiddag' : h < 18 ? 'God eftermiddag' : 'God kväll'; };
@@ -112,17 +134,19 @@ const mealFor = date => (S.data.meal_plan || []).find(m => m.date === date);
 const weekDates = () => DAYS.map((n, i) => { const d = new Date(S.week); d.setDate(d.getDate() + i); return d; });
 const hue = s => [...String(s)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 17);
 const grad = s => { const h = hue(s); return `background:linear-gradient(135deg,hsl(${h} 70% 62%),hsl(${(h + 40) % 360} 75% 48%))`; };
-const avatar = p => `<span class="av p-${p}" title="${P[p] || p}" aria-label="${P[p] || p}">${esc(firstGrapheme(P[p] || p))}</span>`;
-const chip = p => `<span class="chip p-${p}"><i></i>${P[p] || p}</span>`;
-const imgOr = (r, cls) => r.image ? `<div class="${cls}" style="${grad(r.title)}"><img src="${esc(r.image)}" alt="" loading="lazy" onerror="this.remove()"></div>` : `<div class="${cls} ph" style="${grad(r.title)}">${icon('meal')}</div>`;
+const pname = p => esc(P[p] || p), pcls = p => (P[p] ? p : 'gemensamt'); // person kommer från databasen: aldrig rakt in i HTML
+const avatar = p => `<span class="av p-${pcls(p)}" title="${pname(p)}" aria-label="${pname(p)}">${esc(firstGrapheme(P[p] || p))}</span>`;
+const chip = p => `<span class="chip p-${pcls(p)}"><i></i>${pname(p)}</span>`;
+// Trasiga bilder tas bort av en gemensam lyssnare (data-img) i stället för inline-onerror, så att CSP kan förbjuda inline-skript.
+const imgOr = (r, cls) => r.image ? `<div class="${cls}" style="${grad(r.title)}"><img src="${esc(r.image)}" alt="" loading="lazy" data-img></div>` : `<div class="${cls} ph" style="${grad(r.title)}">${icon('meal')}</div>`;
+document.addEventListener('error', e => { if (e.target instanceof HTMLImageElement && e.target.matches('[data-img]')) e.target.remove(); }, true);
 const empty = (ic, title, sub = '', btn = '') => `<div class="empty">${icon(ic)}<b>${title}</b>${sub ? `<span>${sub}</span>` : ''}${btn}</div>`;
 const timeLabel = e => e.span === 'first' ? `${e.start} →` : e.span === 'last' ? `→ ${e.end}` : e.span === 'mid' ? 'Hela dagen' : e.start ? `${e.start}${e.end ? '–' + e.end : ''}` : 'Heldag';
 const mins = hm => +hm.slice(0, 2) * 60 + +hm.slice(3, 5);
 const until = hm => { const d = mins(hm) - mins(nowHM()); if (d <= 0) return 'nu'; const h = Math.floor(d / 60), m = d % 60; return 'om ' + (h ? `${h} h${m ? ' ' + m + ' min' : ''}` : `${m} min`); };
 
-const pad2 = n => String(n).padStart(2, '0');
 const hmOf = (h, m) => `${pad2(h)}:${pad2(m)}`;
-const addMinsHm = (hm, add) => { const t = Math.min(23 * 60 + 55, Math.max(0, mins(hm) + add)); return hmOf(Math.floor(t / 60), t % 60); };
+const addMinsHm = (hm, add) => { const t = (((mins(hm) + add) % 1440) + 1440) % 1440; return hmOf(Math.floor(t / 60), t % 60); }; // går runt midnatt (= slutar dagen efter)
 const isTouchUi = () => matchMedia('(hover: none), (pointer: coarse)').matches;
 
 const buzz = (ms = 12) => {
@@ -150,11 +174,11 @@ const EVENT_SUGGESTS = [
 ];
 const PLACE_EV = ['T.ex. Tandläkare', 'T.ex. Middag med vänner', 'T.ex. Träning', 'T.ex. Bio ikväll', 'T.ex. Kalas!'];
 const PLACE_TODO = ['Vad behöver göras?', 'T.ex. Boka tvättid', 'T.ex. Köpa present', 'T.ex. Ringa mormor'];
-const PLACE_SHOP = ['Lägg till vara…', 'T.ex. Mjölk', 'T.ex. Banancer', 'T.ex. Diskmedel'];
+const PLACE_SHOP = ['Lägg till vara…', 'T.ex. Mjölk', 'T.ex. Bananer', 'T.ex. Diskmedel'];
 const PLACE_RECIPE = ['T.ex. Pannkakor', 'T.ex. Pasta carbonara', 'T.ex. Fredagstacos'];
 const faceSvg = (color, dark = '#052e16') => `<svg class="face" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="15" fill="${color}"/><circle cx="11.5" cy="13.5" r="2.1" fill="${dark}"/><circle cx="20.5" cy="13.5" r="2.1" fill="${dark}"/><path d="M11.5 19.5 q4.5 4 9 0" fill="none" stroke="${dark}" stroke-width="2.2" stroke-linecap="round"/></svg>`;
 const FACES = { niklas: faceSvg('#22c55e'), sambo: faceSvg('#3b82f6', '#0f172a'), gemensamt: faceSvg('#ec4899', '#4a044e') };
-const suggestRow = (items) => `<div class="suggest" role="list" aria-label="Snabbval">${items.map(([em, lab]) => `<button type="button" class="sug" data-sug="${esc(lab)}" data-emo="${esc(em)}" role="listitem"><span class="sug-e" aria-hidden="true">${em}</span><span>${esc(lab)}</span></button>`).join('')}</div>`;
+const suggestRow = (items) => `<div class="suggest" role="group" aria-label="Snabbval">${items.map(([em, lab]) => `<button type="button" class="sug" data-sug="${esc(lab)}" data-emo="${esc(em)}"><span class="sug-e" aria-hidden="true">${em}</span><span>${esc(lab)}</span></button>`).join('')}</div>`;
 const phTimers = new WeakMap();
 function bindSuggests(root, inputSel = '[name=title]') {
   const inp = $(inputSel, root); if (!inp) return;
@@ -239,25 +263,27 @@ const rememberPerson = p => { if (P[p]) localStorage.setItem('fs-last-person', p
 // ---------- dialog UX: sticky footer, tangentbord, osparade ändringar, svensk tid
 let dlgDirty = false, vvCleanup = null;
 const markDlgDirty = () => { dlgDirty = true; };
-function syncDlgHeight() {
+// center = rulla det fokuserade fältet i bild. Görs när tangentbordet ändrar ytan eller fokus flyttas,
+// men inte när användaren själv panorerar (då skulle formuläret dras tillbaka hela tiden).
+function syncDlgHeight(center = true) {
   const d = $('#dlg'); if (!d?.open) return;
   const vv = window.visualViewport;
   const h = Math.floor((vv?.height || window.innerHeight) - (isPhone() ? 28 : 16));
   d.style.setProperty('--dlg-max', Math.max(240, h) + 'px');
   const ae = document.activeElement;
-  if (ae && d.contains(ae) && ae.matches('input,textarea,select,[contenteditable]')) {
-    try { ae.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch { ae.scrollIntoView(); }
+  if (center && ae && d.contains(ae) && ae.matches('input,textarea,select,[contenteditable]')) {
+    try { ae.scrollIntoView({ block: 'center', behavior: reduceMotion ? 'auto' : 'smooth' }); } catch { ae.scrollIntoView(); }
   }
 }
 function bindDlgViewport(d) {
   vvCleanup?.();
-  const on = () => syncDlgHeight();
+  const on = () => syncDlgHeight(), onPan = () => syncDlgHeight(false);
   visualViewport?.addEventListener('resize', on);
-  visualViewport?.addEventListener('scroll', on);
+  visualViewport?.addEventListener('scroll', onPan);
   addEventListener('resize', on);
   d.addEventListener('focusin', on);
   syncDlgHeight();
-  vvCleanup = () => { visualViewport?.removeEventListener('resize', on); visualViewport?.removeEventListener('scroll', on); removeEventListener('resize', on); d.removeEventListener('focusin', on); vvCleanup = null; };
+  vvCleanup = () => { visualViewport?.removeEventListener('resize', on); visualViewport?.removeEventListener('scroll', onPan); removeEventListener('resize', on); d.removeEventListener('focusin', on); vvCleanup = null; };
 }
 
 const TIME_PRESETS = ['08:00', '09:00', '10:00', '12:00', '13:00', '15:00', '17:00', '18:00', '19:00', '20:00'];
@@ -274,20 +300,28 @@ const nextHalfHour = () => {
   return h >= 23 ? '23:30' : hmOf(h + 1, 0);
 };
 
+const tpickTitle = name => (name === 'end' ? 'Sluttid' : 'Starttid');
+const tpickLabel = (name, v) => `${tpickTitle(name)}: ${v || 'ingen vald'}`;
 function timePick(name, value = '') {
   const v = value || '';
   return `<div class="tpick" data-tpick="${name}">
     <input type="hidden" name="${name}" value="${esc(v)}">
-    <button type="button" class="tpick-btn${v ? '' : ' empty'}" aria-haspopup="dialog" aria-expanded="false" aria-label="Välj tid">
-      ${icon('clock')}<span class="tpick-val">${v || 'Välj tid'}</span>
+    <button type="button" class="tpick-btn${v ? '' : ' empty'}" aria-haspopup="dialog" aria-expanded="false" aria-label="${esc(tpickLabel(name, v))}">
+      ${icon('clock')}<span class="tpick-val">${esc(v) || 'Välj tid'}</span>
     </button>
   </div>`;
+}
+// Sätter värde, synlig text och skärmläsaretikett på en tidväljare
+function setTpick(el, v) {
+  if (!el) return; const hid = $('input[type=hidden]', el), btn = $('.tpick-btn', el), val = $('.tpick-val', el);
+  hid.value = v || ''; if (val) val.textContent = v || 'Välj tid';
+  btn?.classList.toggle('empty', !v); btn?.setAttribute('aria-label', tpickLabel(el.dataset.tpick, v));
 }
 
 function openTimeSheet(root, tpickEl, { onChange, onDone } = {}) {
   const hid = $('input[type=hidden]', tpickEl);
   const btn = $('.tpick-btn', tpickEl);
-  const title = tpickEl.dataset.tpick === 'end' ? 'Sluttid' : 'Starttid';
+  const title = tpickTitle(tpickEl.dataset.tpick);
   let draft = hid.value && /^\d{2}:\d{2}$/.test(hid.value) ? hid.value : nextHalfHour();
 
   // stäng eventuell öppen sheet
@@ -298,18 +332,18 @@ function openTimeSheet(root, tpickEl, { onChange, onDone } = {}) {
   const sheet = document.createElement('div');
   sheet.className = 'tsheet';
   sheet.innerHTML = `<div class="tsheet-bg" data-ts-close></div>
-    <div class="tsheet-panel" role="dialog" aria-modal="true" aria-label="${title}">
+    <div class="tsheet-panel" role="dialog" aria-modal="true" aria-label="${title}" tabindex="-1">
       <header class="tsheet-h">
-        <div><span class="tsheet-kicker">${title}</span><div class="tsheet-big" data-ts-big>${draft}</div></div>
+        <div><span class="tsheet-kicker">${title}</span><div class="tsheet-big" data-ts-big aria-live="polite">${draft}</div></div>
         <button type="button" class="round" data-ts-close aria-label="Stäng">${icon('x')}</button>
       </header>
-      <div class="tsheet-presets">${TIME_PRESETS.map(t => `<button type="button" class="chipbtn" data-t="${t}">${t}</button>`).join('')}</div>
+      <div class="tsheet-presets" role="group" aria-label="Vanliga tider">${TIME_PRESETS.map(t => `<button type="button" class="chipbtn" data-t="${t}" aria-pressed="false">${t}</button>`).join('')}</div>
       <div class="tsheet-cols">
-        <div class="tsheet-col" data-kind="h" role="listbox" aria-label="Timme">
-          ${Array.from({ length: 24 }, (_, h) => `<button type="button" role="option" class="tsheet-opt" data-h="${h}">${pad2(h)}</button>`).join('')}
+        <div class="tsheet-col" data-kind="h" role="group" aria-label="Timme">
+          ${Array.from({ length: 24 }, (_, h) => `<button type="button" class="tsheet-opt" data-h="${h}" aria-pressed="false">${pad2(h)}</button>`).join('')}
         </div>
-        <div class="tsheet-col" data-kind="m" role="listbox" aria-label="Minut">
-          ${MIN_STEPS.map(m => `<button type="button" role="option" class="tsheet-opt" data-m="${m}">${pad2(m)}</button>`).join('')}
+        <div class="tsheet-col" data-kind="m" role="group" aria-label="Minut">
+          ${MIN_STEPS.map(m => `<button type="button" class="tsheet-opt" data-m="${m}" aria-pressed="false">${pad2(m)}</button>`).join('')}
         </div>
       </div>
       <footer class="tsheet-f">
@@ -325,28 +359,24 @@ function openTimeSheet(root, tpickEl, { onChange, onDone } = {}) {
   const paint = () => {
     big.textContent = draft || '—:—';
     const h = draft ? +draft.slice(0, 2) : -1, m = draft ? +draft.slice(3, 5) : -1;
-    sheet.querySelectorAll('[data-h]').forEach(b => b.classList.toggle('on', +b.dataset.h === h));
-    sheet.querySelectorAll('[data-m]').forEach(b => b.classList.toggle('on', +b.dataset.m === m));
-    sheet.querySelectorAll('.tsheet-presets [data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === draft));
+    const mark = (b, on) => { b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); };
+    sheet.querySelectorAll('[data-h]').forEach(b => mark(b, +b.dataset.h === h));
+    sheet.querySelectorAll('[data-m]').forEach(b => mark(b, +b.dataset.m === m));
+    sheet.querySelectorAll('.tsheet-presets [data-t]').forEach(b => mark(b, b.dataset.t === draft));
     const hc = sheet.querySelector(`[data-h="${h}"]`);
     const mc = sheet.querySelector(`[data-m="${m}"]`);
-    requestAnimationFrame(() => {
-      for (const el of [hc, mc]) {
-        if (!el) continue;
-        const col = el.closest('.tsheet-col');
-        if (!col) continue;
-        const c = col.getBoundingClientRect(), r = el.getBoundingClientRect();
-        col.scrollTop += (r.top + r.height / 2) - (c.top + c.height / 2);
-      }
-    });
+    for (const el of [hc, mc]) {
+      const col = el?.closest('.tsheet-col');
+      if (!col) continue;
+      // offsetTop påverkas inte av dialogens skalanimation (det gör getBoundingClientRect), och behöver ingen väntan på nästa bildruta
+      col.scrollTop = el.offsetTop - (col.clientHeight - el.offsetHeight) / 2;
+    }
   };
   const setDraft = v => { draft = v || ''; paint(); };
-  const close = () => { sheet.remove(); btn.setAttribute('aria-expanded', 'false'); };
+  const close = () => { if (!sheet.isConnected) return; sheet.remove(); btn.setAttribute('aria-expanded', 'false'); try { btn.focus({ preventScroll: true }); } catch {} };
+  sheet.closeSheet = close; // används av dialogens Esc/bakåt-hantering
   const apply = v => {
-    hid.value = v || '';
-    const valEl = $('.tpick-val', tpickEl);
-    if (valEl) valEl.textContent = v || 'Välj tid';
-    btn.classList.toggle('empty', !v);
+    setTpick(tpickEl, v);
     markDlgDirty();
     onChange?.(hid.name, hid.value);
     close();
@@ -364,9 +394,18 @@ function openTimeSheet(root, tpickEl, { onChange, onDone } = {}) {
     if (t.dataset.h != null) setDraft(hmOf(+t.dataset.h, +cur.slice(3, 5)));
     if (t.dataset.m != null) setDraft(hmOf(+cur.slice(0, 2), +t.dataset.m));
   });
-  // Esc handled by dialog cancel; also stop backdrop click from closing main dlg
+  // Esc/bakåt stänger bara tidväljaren (se dialogens cancel-hanterare); stoppa också bakgrundsklick från att stänga formuläret
   sheet.addEventListener('pointerdown', e => e.stopPropagation());
+  // Håll tangentbordsfokus inne i tidväljaren så länge den är öppen
+  sheet.addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    const f = [...sheet.querySelectorAll('button')].filter(b => !b.disabled); if (!f.length) return;
+    const first = f[0], last = f[f.length - 1], ae = document.activeElement;
+    if (e.shiftKey && (ae === first || !sheet.contains(ae))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (ae === last || !sheet.contains(ae))) { e.preventDefault(); first.focus(); }
+  });
   paint();
+  try { $('.tsheet-panel', sheet).focus({ preventScroll: true }); } catch {}
   syncDlgHeight();
   return sheet;
 }
@@ -387,21 +426,21 @@ function datePick(value) {
   return `<div class="dpick" data-dpick>
     <input type="hidden" name="date" value="${esc(v)}" required>
     <div class="dpick-chips" role="group" aria-label="Snabbval">
-      <button type="button" class="chipbtn ${v === t ? 'on' : ''}" data-d="${t}">Idag</button>
-      <button type="button" class="chipbtn ${v === addDays(t, 1) ? 'on' : ''}" data-d="${addDays(t, 1)}">Imorgon</button>
+      <button type="button" class="chipbtn ${v === t ? 'on' : ''}" data-d="${t}" aria-pressed="${v === t}">Idag</button>
+      <button type="button" class="chipbtn ${v === addDays(t, 1) ? 'on' : ''}" data-d="${addDays(t, 1)}" aria-pressed="${v === addDays(t, 1)}">Imorgon</button>
     </div>
-    <div class="dpick-week" role="listbox" aria-label="Kommande dagar">
-      ${week.map(ds => `<button type="button" role="option" class="chipbtn daychip ${ds === v ? 'on' : ''}" data-d="${ds}"><b>${shortDayChip(ds)}</b></button>`).join('')}
+    <div class="dpick-week" role="group" aria-label="Kommande dagar">
+      ${week.map(ds => `<button type="button" class="chipbtn daychip ${ds === v ? 'on' : ''}" data-d="${ds}" aria-pressed="${ds === v}" aria-label="${esc(fmtDate(ds))}"><b>${shortDayChip(ds)}</b></button>`).join('')}
     </div>
-    <button type="button" class="dpick-more" aria-haspopup="dialog" aria-expanded="false">
+    <button type="button" class="dpick-more" aria-expanded="false">
       <span class="dpick-more-lab">Annat datum</span>
       <span class="dpick-more-val">${esc(shortDate(v))}</span>
       ${icon('calendar')}
     </button>
-    <div class="dpick-cal" hidden role="dialog" aria-label="Kalender">
+    <div class="dpick-cal" hidden role="group" aria-label="Kalender">
       <div class="dpick-cal-h">
         <button type="button" class="round" data-cal-prev aria-label="Föregående månad">${icon('left')}</button>
-        <b class="dpick-cal-title"></b>
+        <b class="dpick-cal-title" aria-live="polite"></b>
         <button type="button" class="round" data-cal-next aria-label="Nästa månad">${icon('right')}</button>
       </div>
       <div class="dpick-dows">${DAYS_SHORT.map(x => `<span>${x}</span>`).join('')}</div>
@@ -421,7 +460,7 @@ function bindDatePick(root) {
 
   const paint = () => {
     const v = hid.value;
-    wrap.querySelectorAll('[data-d]').forEach(b => b.classList.toggle('on', b.dataset.d === v));
+    wrap.querySelectorAll('[data-d]').forEach(b => { b.classList.toggle('on', b.dataset.d === v); b.setAttribute('aria-pressed', b.dataset.d === v); });
     const mv = $('.dpick-more-val', wrap); if (mv) mv.textContent = shortDate(v);
     more.classList.toggle('on', !relDay(v) && !Array.from({ length: 7 }, (_, i) => addDays(todayIso(), i)).includes(v));
   };
@@ -438,7 +477,7 @@ function bindDatePick(root) {
     for (let day = 1; day <= daysInMonth; day++) {
       const ds = `${y}-${pad2(m)}-${pad2(day)}`;
       const cls = ['chipbtn', 'calday', ds === hid.value ? 'on' : '', ds === todayIso() ? 'today' : ''].filter(Boolean).join(' ');
-      cells.push(`<button type="button" class="${cls}" data-cal-day="${ds}">${day}</button>`);
+      cells.push(`<button type="button" class="${cls}" data-cal-day="${ds}" aria-pressed="${ds === hid.value}" aria-label="${esc(fmtDate(ds))}${ds === todayIso() ? ' (idag)' : ''}">${day}</button>`);
     }
     $('.dpick-grid', wrap).innerHTML = cells.join('');
   };
@@ -458,9 +497,10 @@ function bindDatePick(root) {
   $('[data-cal-prev]', wrap).onclick = () => { const d = new Date(cursor + 'T12:00'); d.setMonth(d.getMonth() - 1); cursor = monthStart(iso(d)); renderCal(); };
   $('[data-cal-next]', wrap).onclick = () => { const d = new Date(cursor + 'T12:00'); d.setMonth(d.getMonth() + 1); cursor = monthStart(iso(d)); renderCal(); };
   $('.dpick-grid', wrap).onclick = e => { const b = e.target.closest('[data-cal-day]'); if (b) set(b.dataset.calDay); };
+  // root är den återanvända <dialog>: knyt lyssnaren till den här öppningen så att de inte staplas
   root.addEventListener('click', e => {
     if (!e.target.closest('[data-dpick]')) { cal.hidden = true; more.setAttribute('aria-expanded', 'false'); }
-  });
+  }, { signal: dlgAbort?.signal });
   paint();
 }
 
@@ -485,22 +525,29 @@ function shell() {
   const cycle = () => { const o = ['auto', 'light', 'dark']; localStorage.setItem('fs-theme', o[(o.indexOf(themePref()) + 1) % 3]); applyTheme(); toast(THEME_TXT[themePref()]); };
   $('#theme').onclick = cycle; $('#theme2').onclick = cycle; $('#settings').onclick = settings; $('#settings2').onclick = settings;
   $('#fab').onclick = addMenu; $('#night').onclick = wake;
-  $('#dlg').addEventListener('close', () => { vvCleanup?.(); dlgDirty = false; if (pendingReload) location.reload(); });
-  $('#dlg').addEventListener('cancel', e => { if (dlgDirty) { e.preventDefault(); requestCloseDlg(); } });
+  // Omritningar hoppas över medan en dialog är öppen – ta igen dem när den stängs.
+  // close-händelsen kommer asynkront: har en ny dialog redan öppnats (t.ex. Lägg till → Händelse) ska dess bindningar inte städas bort.
+  $('#dlg').addEventListener('close', e => { if (e.target.open) return; vvCleanup?.(); dlgAbort?.abort(); dlgDirty = false; if (pendingReload) location.reload(); else render(false); });
+  $('#dlg').addEventListener('cancel', e => {
+    // Esc/bakåt stänger först en öppen tidväljare eller månadskalender, inte hela formuläret
+    const ts = $('.tsheet', e.target); if (ts) { e.preventDefault(); ts.closeSheet?.(); return; }
+    const cal = $('.dpick-cal:not([hidden])', e.target); if (cal) { e.preventDefault(); cal.hidden = true; $('.dpick-more', e.target)?.setAttribute('aria-expanded', 'false'); return; }
+    if (dlgDirty) { e.preventDefault(); requestCloseDlg(); }
+  });
   applyTheme(); renderNet(); tick(); clearInterval(tickTimer); tickTimer = setInterval(tick, 1000); requestWakeLock();
 }
 function renderNet() { const n = $('#net'); if (n) n.hidden = navigator.onLine; }
 const logo = () => `<svg viewBox="0 0 48 48" class="logo" aria-hidden="true"><defs><linearGradient id="lgbg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fffaf3"/><stop offset="1" stop-color="#fde8ff"/></linearGradient></defs><rect width="48" height="48" rx="14" fill="url(#lgbg)"/><circle cx="16.5" cy="17" r="7.2" fill="#22c55e"/><circle cx="14.2" cy="15.8" r="1.15" fill="#052e16"/><circle cx="18.4" cy="15.8" r="1.15" fill="#052e16"/><path d="M14.5 18.6 q2 1.7 4 0" fill="none" stroke="#052e16" stroke-width=".9" stroke-linecap="round"/><circle cx="31.5" cy="17" r="7.2" fill="#3b82f6"/><circle cx="29.2" cy="15.8" r="1.15" fill="#0f172a"/><circle cx="33.4" cy="15.8" r="1.15" fill="#0f172a"/><path d="M29.5 18.6 q2 1.7 4 0" fill="none" stroke="#0f172a" stroke-width=".9" stroke-linecap="round"/><rect x="8" y="22" width="32" height="20" rx="5" fill="#fff" stroke="#ec4899" stroke-width="2"/><rect x="8" y="22" width="32" height="6.5" rx="5" fill="#ec4899"/><rect x="8" y="25.5" width="32" height="3" fill="#ec4899"/><circle cx="15" cy="33.5" r="2" fill="#22c55e"/><circle cx="24" cy="33.5" r="2" fill="#3b82f6"/><circle cx="33" cy="33.5" r="2" fill="#f9a8d4"/><circle cx="15" cy="38.8" r="2" fill="#86efac"/><circle cx="24" cy="38.8" r="2" fill="#93c5fd"/><circle cx="33" cy="38.8" r="2" fill="#fbcfe8"/><circle cx="24" cy="21.5" r="5.2" fill="#fff"/><path d="M24 23.4 C24 21.7 22.7 20.7 21.4 20.7 C20.3 20.7 19.6 21.5 19.6 22.5 C19.6 24.4 22.4 25.7 24 27 C25.6 25.7 28.4 24.4 28.4 22.5 C28.4 21.5 27.7 20.7 26.6 20.7 C25.3 20.7 24 21.7 24 23.4 Z" fill="#ec4899"/></svg>`;
 function go(v) {
   if (v === S.view) { $('#main').scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' }); return; }
-  S.view = v; if (v !== 'kalender') S.showPast = false;
+  S.view = v; S.open.clear(); if (v !== 'kalender') S.showPast = false;
   if (document.startViewTransition && !reduceMotion) document.startViewTransition(() => render()); else render();
   $('#main').scrollTop = 0;
 }
 let lastMin = '', tickTimer;
 function tick() {
-  const n = new Date(); const hm = nowHM();
-  const d = cap(n.toLocaleDateString('sv-SE', { weekday: 'long', day: 'numeric', month: 'long', timeZone: TZ }));
+  const hm = nowHM();
+  const d = cap(fLongDate.format(new Date()));
   document.querySelectorAll('[data-clock]').forEach(x => x.textContent = hm);
   if ($('#mdate')) $('#mdate').textContent = `${d} · ${hm}`;
   syncNight();
@@ -513,9 +560,13 @@ function tick() {
 // Nattläge sparas per enhet. Skärmens faktiska ljusstyrka styrs fortfarande av Android.
 const NIGHT_DEFAULTS = { enabled: !isPhone(), start: '23:00', end: '06:00' };
 const NIGHT_WAKE_MS = 2 * 60e3;
+let nightCache = null; // läses varje sekund av tick(): tolka localStorage en gång och nollställ när inställningen ändras
 function nightSettings() {
-  try { const v = JSON.parse(localStorage.getItem('fs-night') || '{}'); return { enabled: typeof v.enabled === 'boolean' ? v.enabled : NIGHT_DEFAULTS.enabled, start: /^([01]\d|2[0-3]):[0-5]\d$/.test(v.start) ? v.start : NIGHT_DEFAULTS.start, end: /^([01]\d|2[0-3]):[0-5]\d$/.test(v.end) ? v.end : NIGHT_DEFAULTS.end }; } catch { return { ...NIGHT_DEFAULTS }; }
+  if (nightCache) return nightCache;
+  try { const v = JSON.parse(localStorage.getItem('fs-night') || '{}'); nightCache = { enabled: typeof v.enabled === 'boolean' ? v.enabled : NIGHT_DEFAULTS.enabled, start: /^([01]\d|2[0-3]):[0-5]\d$/.test(v.start) ? v.start : NIGHT_DEFAULTS.start, end: /^([01]\d|2[0-3]):[0-5]\d$/.test(v.end) ? v.end : NIGHT_DEFAULTS.end }; } catch { nightCache = { ...NIGHT_DEFAULTS }; }
+  return nightCache;
 }
+addEventListener('storage', e => { if (e.key === 'fs-night') nightCache = null; });
 function nightActive() {
   const n = nightSettings(), hm = nowHM();
   return n.enabled && n.start !== n.end && (n.start > n.end ? hm >= n.start || hm < n.end : hm >= n.start && hm < n.end);
@@ -528,7 +579,8 @@ async function requestWakeLock() {
 }
 function syncNight() {
   const n = $('#night'); if (!n) return;
-  const show = nightActive() && Date.now() >= awakeUntil && !$('#dlg')?.open;
+  // Nattklockan tänds först när skärmen varit orörd en stund – inte mitt i användning när klockan slår nattens starttid.
+  const show = nightActive() && Date.now() >= Math.max(awakeUntil, lastTouch + NIGHT_WAKE_MS) && !$('#dlg')?.open;
   if (!show) { n.hidden = true; return; }
   if (n.hidden) sleepScreen();
 }
@@ -537,7 +589,8 @@ function updateNightContent() {
   const minute = todayIso() + nowHM(); if (minute === lastNightMinute) return; lastNightMinute = minute;
   const c = weather()?.current;
   $('.n-weather', n).innerHTML = c ? `${wxIcon(c.weather_code, !!c.is_day)}<span>${deg(c.temperature_2m)} · ${wxText(c.weather_code)} · Mölndal</span>` : 'Väder saknas just nu';
-  const day = nowHM() >= nightSettings().start ? addDays(todayIso(), 1) : todayIso();
+  // "Imorgon" bara på kvällssidan av en natt som går över midnatt; efter midnatt (eller om natten börjar efter midnatt) gäller idag.
+  const ns = nightSettings(); const day = ns.start > ns.end && nowHM() >= ns.start ? addDays(todayIso(), 1) : todayIso();
   const nx = eventsOn(day).find(e => !e.start || e.start >= (day === todayIso() ? nowHM() : '00:00'));
   $('.n-next', n).innerHTML = nx ? `${day === todayIso() ? 'Idag' : 'Imorgon'} ${nx.start ? 'kl ' + esc(nx.start) : '· Heldag'} · ${esc(nx.title)}` : '';
   // Små lägesförflyttningar varje minut för att undvika statiska pixlar.
@@ -546,13 +599,25 @@ function updateNightContent() {
 }
 function sleepScreen() { const n = $('#night'); if (!n) return; n.hidden = false; lastNightMinute = ''; updateNightContent(); }
 function wake() { awakeUntil = Date.now() + NIGHT_WAKE_MS; $('#night').hidden = true; requestWakeLock(); resetIdle(); }
+const IDLE_MS = 3 * 60e3, DLG_IDLE_MS = 30 * 60e3;
+// Körs var tredje minut utan beröring (armas om av sig själv, så veckoskifte och väntande uppdatering fångas även på en orörd skärm).
 const resetIdle = () => { clearTimeout(idle); idle = setTimeout(() => {
   if (!$('#main')) return;
-  if ($('#dlg')?.open) return resetIdle();
+  const d = $('#dlg');
+  if (d?.open) {
+    // En kvarglömd dialog får inte låsa plattan (nattläge, omritning, ny version). Den stängs efter 30 min utan beröring –
+    // nattetid redan efter 3 min om inget är osparat – så att ett recept kan stå framme medan man lagar mat.
+    const limit = !dlgDirty && nightActive() ? IDLE_MS : DLG_IDLE_MS;
+    if (Date.now() - lastTouch < limit) return resetIdle();
+    dlgDirty = false; d.close();
+  }
   if (pendingReload) return location.reload();
-  if (S.view !== 'hem' || iso(S.week) !== iso(mondayOf(new Date()))) { S.view = 'hem'; S.week = mondayOf(new Date()); S.showPast = false; render(); }
-}, 180000); };
-['pointerdown', 'keydown', 'wheel'].forEach(e => addEventListener(e, () => { lastTouch = Date.now(); resetIdle(); if (nightActive() && $('#night')?.hidden) awakeUntil = Date.now() + NIGHT_WAKE_MS; requestWakeLock(); }, { passive: true }));
+  const wk = thisMonday();
+  if (S.view !== 'hem' || iso(S.week) !== iso(wk)) { S.view = 'hem'; S.week = wk; S.showPast = false; S.open.clear(); render(); }
+  resetIdle();
+}, IDLE_MS); };
+// capture: räkna även tryck som stoppas längre ner (t.ex. inne i tidväljaren)
+['pointerdown', 'keydown', 'wheel'].forEach(e => addEventListener(e, () => { lastTouch = Date.now(); resetIdle(); if (nightActive() && $('#night')?.hidden) awakeUntil = Date.now() + NIGHT_WAKE_MS; requestWakeLock(); }, { passive: true, capture: true }));
 
 // ---------- rendering
 function render(animate = true) {
@@ -562,7 +627,21 @@ function render(animate = true) {
   document.title = (S.view === 'hem' ? '' : title + ' · ') + 'Familjeskärmen';
   const st = m.scrollTop; const keep = !animate; const sx = keep ? [...m.querySelectorAll('[data-keep-scroll]')].map(x => x.scrollTop) : [];
   m.className = 'view-' + S.view + (animate && !reduceMotion ? ' enter' : '');
-  m.innerHTML = S.loaded ? ({ hem, kalender, todo, matsedel, recept, inkop })[S.view]() : skeleton();
+  const html = S.loaded ? ({ hem, kalender, todo, matsedel, recept, inkop })[S.view]() : skeleton();
+  // Snabbformuläret (Att göra/Inköp) får inte bytas ut under den som skriver – då försvinner text, fokus och tangentbord.
+  // Behåll den levande noden på plats och byt bara innehållet runt den.
+  const quick = keep ? [...m.children].find(n => n.matches('form.quick')) : null;
+  let kept = false;
+  if (quick && (quick.contains(document.activeElement) || quick.elements.title?.value)) {
+    const tpl = document.createElement('template'); tpl.innerHTML = html;
+    const nodes = [...tpl.content.childNodes], i = nodes.findIndex(n => n.nodeType === 1 && n.matches('form.quick') && n.dataset.form === quick.dataset.form);
+    if (i >= 0) {
+      while (quick.previousSibling) quick.previousSibling.remove();
+      while (quick.nextSibling) quick.nextSibling.remove();
+      quick.before(...nodes.slice(0, i)); quick.after(...nodes.slice(i + 1)); kept = true;
+    }
+  }
+  if (!kept) m.innerHTML = html;
   if (keep) { m.scrollTop = st; m.querySelectorAll('[data-keep-scroll]').forEach((x, i) => { if (sx[i] != null) x.scrollTop = sx[i]; }); }
   requestAnimationFrame(updateDayOverflow);
   // Hem: håll "nu" i bild i dagens lista så länge ingen har rört skärmen den senaste minuten
@@ -576,6 +655,8 @@ function updateDayOverflow() {
   });
 }
 addEventListener('resize', updateDayOverflow);
+// Kom ihåg utfällda <details data-keep> mellan omritningar (toggle bubblar inte, därav capture)
+document.addEventListener('toggle', e => { const k = e.target?.dataset?.keep; if (k) e.target.open ? S.open.add(k) : S.open.delete(k); }, true);
 const skeleton = () => `<div class="skel-wrap" aria-busy="true" aria-label="Laddar">${'<div class="skel"></div>'.repeat(3)}</div>`;
 
 // ----- Hem
@@ -592,10 +673,10 @@ function nextUp() {
 function wxNow(d, cls = '') {
   if (!d) return `<div class="wx-now wx-miss ${cls}">${icon('cloudoff')}<span>Väder saknas just nu</span></div>`;
   const c = d.current, D = d.daily; const di = Math.max(0, D.time.indexOf(todayIso()));
-  const pp = D.precipitation_probability_max?.[di], ps = D.precipitation_sum?.[di];
+  const pp = +D.precipitation_probability_max?.[di] || 0, ps = +D.precipitation_sum?.[di] || 0; // tal, aldrig rå text från API:t i HTML
   return `<div class="wx-now ${cls}" aria-label="Vädret i ${weatherPlace}: ${wxText(c.weather_code)}, ${deg(c.temperature_2m)}">${wxIcon(c.weather_code, !!c.is_day, 'big')}<div class="wx-t">${deg(c.temperature_2m)}</div>
     <div class="wx-info"><b>${wxText(c.weather_code)}</b><span>${weatherPlace} · <span class="wx-hl">↑ ${deg(D.temperature_2m_max[di])}  ↓ ${deg(D.temperature_2m_min[di])}</span></span>
-    <span class="wx-meta"><span>${icon('wind')}${num(c.wind_speed_10m, 0)} m/s</span><span>${icon('drop')}${pp ?? 0} %${ps >= 0.1 ? ' · ' + num(ps) + ' mm' : ''}</span></span></div></div>`;
+    <span class="wx-meta"><span>${icon('wind')}${num(c.wind_speed_10m, 0)} m/s</span><span>${icon('drop')}${Math.round(pp)} %${ps >= 0.1 ? ' · ' + num(ps) + ' mm' : ''}</span></span></div></div>`;
 }
 function wxFc(d) {
   if (!d) return `<section class="card wxfc"><header><div><span class="section-kicker">Väder</span><h2>Mölndal</h2></div></header>${wxNow(null)}<p class="muted small">Prognosen uppdateras automatiskt.</p></section>`;
@@ -608,10 +689,11 @@ function wxFc(d) {
   const hrs = hours.slice(-7).map(h => H.time.indexOf(`${day}T${String(h).padStart(2, '0')}:00`)).filter(i => i >= 0);
   const days = D.time.map((date, i) => ({date, i})).filter(x => x.date > todayIso()).slice(0, 7);
   const finite = v => v != null && Number.isFinite(+v);
-  const rain = i => finite(D.precipitation_probability_max?.[i]) ? D.precipitation_probability_max[i] + ' %' : '–';
+  const pct = v => finite(v) ? Math.round(+v) + ' %' : '–';
+  const rain = i => pct(D.precipitation_probability_max?.[i]);
   return `<section class="card wxfc" aria-label="Väder och sjudygnsprognos för Mölndal"><header><div><span class="section-kicker">Vädret hemma</span><h2>Mölndal</h2></div><span class="weather-source">Open-Meteo</span></header>
     ${wxNow(d, 'weather-current')}
-    ${hrs.length ? `<div class="forecast-label"><span>${late ? 'Timprognos · ' + dayName(day).toLowerCase() : 'Fram till kvällen'}</span><small>${late ? new Date(day + 'T12:00').toLocaleDateString('sv-SE', {day:'numeric',month:'short'}) : 'Idag'}</small></div><div class="wxrow hours" style="grid-template-columns:repeat(${hrs.length},minmax(0,1fr))">${hrs.map(i => `<div class="wxh"><span>${H.time[i].slice(11,16)}</span>${wxIcon(H.weather_code[i], !!H.is_day[i])}<b>${deg(H.temperature_2m[i])}</b><small class="wx-p">${H.precipitation_probability[i] != null ? H.precipitation_probability[i] + ' %' : '–'}</small></div>`).join('')}</div>` : ''}
+    ${hrs.length ? `<div class="forecast-label"><span>${late ? 'Timprognos · ' + dayName(day).toLowerCase() : 'Fram till kvällen'}</span><small>${late ? new Date(day + 'T12:00').toLocaleDateString('sv-SE', {day:'numeric',month:'short'}) : 'Idag'}</small></div><div class="wxrow hours" style="grid-template-columns:repeat(${hrs.length},minmax(0,1fr))">${hrs.map(i => `<div class="wxh"><span>${esc(H.time[i].slice(11,16))}</span>${wxIcon(H.weather_code[i], !!H.is_day[i])}<b>${deg(H.temperature_2m[i])}</b><small class="wx-p">${pct(H.precipitation_probability?.[i])}</small></div>`).join('')}</div>` : ''}
     <div class="forecast-label daily-label"><span>Kommande sju dagar</span><small>Max / min · regnrisk</small></div>
     <div class="forecast-days">${days.map(({date,i},k) => `<div class="forecast-day"><div class="forecast-date"><b>${k === 0 ? 'Imorgon' : dayName(date)}</b><small>${new Date(date+'T12:00').toLocaleDateString('sv-SE',{day:'numeric',month:'short'})}</small></div>${wxIcon(D.weather_code[i],true)}<div class="forecast-temps"><b>${deg(D.temperature_2m_max[i])}</b><span>${deg(D.temperature_2m_min[i])}</span></div><span class="forecast-rain" title="${finite(D.precipitation_sum?.[i]) ? num(D.precipitation_sum[i]) + ' mm nederbörd' : 'Regnrisk'}">${icon('drop')}${rain(i)}</span></div>`).join('')}</div>
   </section>`;
@@ -621,12 +703,11 @@ function transitCard() {
   const rows = fresh ? d.departures.filter(x => Date.parse(x.estimated || x.planned) >= Date.now() - 30000).slice(0, 6) : [];
   const message = d.status === 'loading' ? 'Hämtar avgångar…' : d.status === 'unconfigured' ? 'Avgångar är inte konfigurerade än' : d.status !== 'ok' || !fresh ? 'Avgångar kan inte hämtas just nu' : 'Inga avgångar de närmaste två timmarna';
   return `<section class="card transit" aria-label="Avgångar från Lackarebäck"><header><div><span class="eyebrow">Västtrafik</span><h2>Lackarebäck</h2></div><span class="transit-mark" aria-hidden="true">↗</span></header>
-    ${rows.length ? `<div class="dep-list">${rows.map(x => { const m = Math.max(0, Math.ceil((Date.parse(x.estimated || x.planned) - Date.now()) / 60000)); const delay = x.estimated ? Math.round((Date.parse(x.estimated) - Date.parse(x.planned)) / 60000) : 0; return `<div class="dep ${x.cancelled ? 'cancelled' : ''}"><b class="dep-line" style="background:${esc(x.background)};color:${esc(x.foreground)}">${esc(x.line)}</b><div class="dep-dest" title="${esc(x.destination)}"><b>${esc(x.destination.split(',')[0])}</b><small>${x.platform ? 'Läge ' + esc(x.platform) + ' · ' : ''}${x.cancelled ? 'Inställd' : delay > 0 ? '+' + delay + ' min försenad' : x.partCancelled ? 'Delvis inställd' : x.destination.includes('Ersätter') ? 'Ersätter spårvagn' : x.estimated ? 'Realtid' : 'Tidtabell'}</small></div><strong>${x.cancelled ? '–' : m < 1 ? 'Nu' : m <= 60 ? m + ' min' : new Date(x.estimated || x.planned).toLocaleTimeString('sv-SE', {hour:'2-digit',minute:'2-digit',timeZone:TZ})}</strong></div>`; }).join('')}</div><div class="dep-foot">Uppdaterad ${new Date(d.updatedAt).toLocaleTimeString('sv-SE', {hour:'2-digit',minute:'2-digit',timeZone:TZ})} · alla lägen</div>` : `<div class="dep-empty"><b>${message}</b><span>${d.status === 'unconfigured' ? 'Västtrafik behöver kopplas in. Här visas sedan nästa buss eller spårvagn.' : 'Uppdateras automatiskt varje minut.'}</span></div>`}
+    ${rows.length ? `<div class="dep-list">${rows.map(x => { const m = Math.max(0, Math.ceil((Date.parse(x.estimated || x.planned) - Date.now()) / 60000)); const delay = x.estimated ? Math.round((Date.parse(x.estimated) - Date.parse(x.planned)) / 60000) : 0; return `<div class="dep ${x.cancelled ? 'cancelled' : ''}"><b class="dep-line" style="background:${esc(x.background)};color:${esc(x.foreground)}">${esc(x.line)}</b><div class="dep-dest" title="${esc(x.destination)}"><b>${esc(x.destination.split(',')[0])}</b><small>${x.platform ? 'Läge ' + esc(x.platform) + ' · ' : ''}${x.cancelled ? 'Inställd' : delay > 0 ? '+' + delay + ' min försenad' : x.partCancelled ? 'Delvis inställd' : x.destination.includes('Ersätter') ? 'Ersätter spårvagn' : x.estimated ? 'Realtid' : 'Tidtabell'}</small></div><strong>${x.cancelled ? '–' : m < 1 ? 'Nu' : m <= 60 ? m + ' min' : fClock.format(new Date(x.estimated || x.planned))}</strong></div>`; }).join('')}</div><div class="dep-foot">Uppdaterad ${fClock.format(new Date(d.updatedAt))} · alla lägen</div>` : `<div class="dep-empty"><b>${message}</b><span>${d.status === 'unconfigured' ? 'Västtrafik behöver kopplas in. Här visas sedan nästa buss eller spårvagn.' : 'Uppdateras automatiskt varje minut.'}</span></div>`}
   </section>`;
 }
 function hem() {
   const t = todayIso(), tm = addDays(t, 1); const ev = eventsOn(t), evT = eventsOn(tm);
-  const r = null;
   const todos = (S.data.todos || []).filter(x => !x.done); const doneN = (S.data.todos || []).length - todos.length;
   const now = nowHM(); const d = new Date();
   const allDay = ev.filter(e => !e.start), timed = ev.filter(e => e.start);
@@ -640,11 +721,11 @@ function hem() {
     <section class="hero">
       <div class="greet">${greeting()}</div>
       <div class="bigclock" data-clock>${now}</div>
-      <div class="bigdate">${cap(d.toLocaleDateString('sv-SE', { weekday: 'long', timeZone: TZ }))} ${d.toLocaleDateString('sv-SE', { day: 'numeric', month: 'long', timeZone: TZ })} <span>· vecka ${weekNo(d)}</span></div>
-      <div class="summary">${nx ? `<div class="nextup">${nx}</div>` : summaryLine(ev, todos, r)}</div>
+      <div class="bigdate">${cap(fWeekday.format(d))} ${fDayMonth.format(d)} <span>· vecka ${weekNo(new Date(t + 'T12:00'))}</span></div>
+      <div class="summary">${nx ? `<div class="nextup">${nx}</div>` : summaryLine(ev, todos)}</div>
       <div class="household-legend"><span class="p-niklas"><i></i>Hubby</span><span class="p-sambo"><i></i>Wifey</span><span class="p-gemensamt"><i></i>Gemensamt</span></div>
     </section>
-    <section class="card today"><header><div><h2>Idag</h2><div class="hsub">${summaryLine(ev, todos, r, true)}</div></div><button class="pill" data-act="newEvent" data-date="${t}">${icon('plus')}Händelse</button></header>
+    <section class="card today"><header><div><h2>Idag</h2><div class="hsub">${summaryLine(ev, todos, true)}</div></div><button class="pill" data-act="newEvent" data-date="${t}">${icon('plus')}Händelse</button></header>
       ${nx ? `<div class="nextup m-only">${nx}</div>` : ''}
       ${allDay.length ? `<div class="allday">${allDay.map(e => `<span class="adchip p-${e.person}" ${evAttrs(e)}>${srcIcon(e)}${esc(e.title)}</span>`).join('')}</div>` : ''}
       <div class="timeline" data-keep-scroll>${timed.length ? tl : allDay.length ? '' : empty('sparkle', 'En lugn dag ☁️', 'Inget inplanerat – njut av andrummet.')}</div>
@@ -656,11 +737,10 @@ function hem() {
       ${todos.length > 3 ? `<button class="link" data-view-go="todo">Visa alla ${todos.length} ${icon('right')}</button>` : todos.length ? `<button class="link" data-act="newTodo">${icon('plus')}Ny uppgift</button>` : ''}</section></div>
   </div>`;
 }
-function summaryLine(ev, todos, r, short = false) {
+function summaryLine(ev, todos, short = false) {
   const parts = [];
   parts.push(ev.length ? `${ev.length} ${ev.length === 1 ? 'händelse' : 'händelser'}` + (short ? '' : ' idag') : short ? 'Inga händelser' : 'Inga händelser idag');
   if (!short && todos.length) parts.push(`${todos.length} att göra`);
-  if (!short && r) parts.push(`${esc(r.title).toLowerCase()} till middag`);
   return parts.join(' · ');
 }
 const todoRow = x => `<label class="row-item ${x.done ? 'done' : ''}"><input type="checkbox" class="cb" data-todo="${x.id}" ${x.done ? 'checked' : ''}><span class="cbx">${icon('check')}</span><span class="t">${esc(x.title)}</span>${avatar(x.person)}<button class="del" data-del="todos:${x.id}" aria-label="Ta bort ${esc(x.title)}">${icon('x')}</button></label>`;
@@ -669,20 +749,20 @@ const todoRow = x => `<label class="row-item ${x.done ? 'done' : ''}"><input typ
 function weekBar(title, extra = '') {
   const end = new Date(S.week); end.setDate(end.getDate() + 6);
   const f = d => d.toLocaleDateString('sv-SE', { day: 'numeric', month: 'short' }).replace('.', '');
-  const isThis = iso(S.week) === iso(mondayOf(new Date()));
-  const rel = isThis ? 'Denna vecka' : iso(S.week) === addDays(iso(mondayOf(new Date())), 7) ? 'Nästa vecka' : iso(S.week) === addDays(iso(mondayOf(new Date())), -7) ? 'Förra veckan' : '';
+  const isThis = iso(S.week) === iso(thisMonday());
+  const rel = isThis ? 'Denna vecka' : iso(S.week) === addDays(iso(thisMonday()), 7) ? 'Nästa vecka' : iso(S.week) === addDays(iso(thisMonday()), -7) ? 'Förra veckan' : '';
   return `<div class="bar"><div><h1>${title}</h1><div class="sub">${rel ? `<span class="rel ${isThis ? 'now' : ''}">${rel}</span>` : ''}Vecka ${weekNo(S.week)} · ${f(S.week)} – ${f(end)}</div></div>
     <div class="bar-r">${extra}<div class="seg" role="group" aria-label="Byt vecka"><button data-act="prev" aria-label="Föregående vecka">${icon('left')}</button><button data-act="thisweek" ${isThis ? 'disabled' : ''} aria-label="Gå till denna vecka">Idag</button><button data-act="next" aria-label="Nästa vecka">${icon('right')}</button></div></div></div>`;
 }
 function feedWarn() {
   if (!S.feedErr.length) return '';
   const n = S.feedErr.length;
-  return `<div class="warn warn-compact" role="status">${icon('info')}<details><summary><b>${n === 1 ? 'En kalender' : n + ' kalendrar'} kunde inte uppdateras</b> · Senast hämtade pass visas <u>Visa detaljer</u></summary><span>${S.feedErr.map(esc).join('<br>')}</span></details><button class="pill" data-act="reloadFeeds">${icon('refresh')}Försök igen</button></div>`;
+  return `<div class="warn warn-compact" role="status">${icon('info')}<details ${keepOpen('feedwarn')}><summary><b>${n === 1 ? 'En kalender' : n + ' kalendrar'} kunde inte uppdateras</b> · Senast hämtade pass visas <u>Visa detaljer</u></summary><span>${S.feedErr.map(esc).join('<br>')}</span></details><button class="pill" data-act="reloadFeeds">${icon('refresh')}Försök igen</button></div>`;
 }
 function kalender() {
   const t = todayIso(), now = nowHM();
   const filters = `<div class="filters" role="group" aria-label="Visa personer">${Object.keys(P).map(p => `<button class="fchip p-${p} ${S.filter.has(p) ? 'on' : ''}" data-filter="${p}" aria-pressed="${S.filter.has(p)}"><i></i>${P[p]}</button>`).join('')}${S.feedsLoading ? `<span class="spin" role="status" aria-label="Hämtar kalendrar">${icon('refresh')}</span>` : ''}</div>`;
-  const days = weekDates(); const isThis = iso(S.week) === iso(mondayOf(new Date()));
+  const days = weekDates(); const isThis = iso(S.week) === iso(thisMonday());
   const hidePast = isPhone() && isThis && !S.showPast; const pastN = days.filter(d => iso(d) < t).length;
   const cards = days.map((d, i) => {
     const ds = iso(d); const ev = eventsOn(ds, true); const ad = ev.filter(e => !e.start), tm = ev.filter(e => e.start);
@@ -695,8 +775,8 @@ function kalender() {
       <div class="dh"><span class="dn"><span class="s">${DAYS[i].slice(0, 3)}</span><span class="l">${DAYS[i]}</span></span><b>${d.getDate()}</b>${rel && rel !== 'Igår' ? `<em class="drel">${rel}</em>` : ''}</div>
       <div class="dlist" data-day="${ds}" data-keep-scroll>${ad.length ? `<div class="adrow">${ad.map(e => `<div class="wad p-${e.person}" ${evAttrs(e)}>${srcIcon(e)}${esc(e.title)}</div>`).join('')}</div>` : ''}${items || (ad.length ? '' : '<div class="dempty">Inget inplanerat</div>')}</div>
       <button class="day-overflow" data-overflow="${ds}" hidden aria-label="Visa fler händelser denna dag"></button>
-      <button class="dadd" data-act="newEvent" data-date="${ds}" aria-label="Ny händelse ${DAYS[i].toLowerCase()} ${d.getDate()}/${d.getMonth() + 1}">${icon('plus')}<span>Lägg till</span></button>
-      ${r ? `<div class="dmeal" data-recipe="${r.id}" role="button" tabindex="0">${icon('meal')}<span>${esc(r.title)}</span></div>` : ''}</div>`;
+      ${r ? `<div class="dmeal" data-recipe="${r.id}" role="button" tabindex="0" aria-label="Middag: ${esc(r.title)}">${icon('meal')}<span>${esc(r.title)}</span></div>` : ''}
+      <button class="dadd" data-act="newEvent" data-date="${ds}" aria-label="Ny händelse ${DAYS[i].toLowerCase()} ${d.getDate()}/${d.getMonth() + 1}">${icon('plus')}<span>Lägg till</span></button></div>`;
   }).join('');
   const kinds = [...new Set(S.feeds.map(f => feedKind(f.feed.url)))];
   return weekBar('Kalender', filters) + feedWarn()
@@ -712,7 +792,7 @@ function todo() {
   return `<div class="bar"><div><h1>Att göra</h1><div class="sub">${open.length ? `${open.length} kvar` : 'Allt klart'}${done.length ? ` · ${done.length} klara` : ''}</div></div></div>
   <form class="quick" data-form="todo"><input name="title" placeholder="Vad behöver göras?" required autocomplete="off" enterkeyhint="done" aria-label="Ny uppgift" maxlength="200">${personPick()}<button class="primary">${icon('plus')}<span>Lägg till</span></button></form>
   ${groups.length ? `<div class="groups">${groups.map(([p, xs]) => `<section class="card group"><header>${chip(p)}<span class="count">${xs.length}</span></header><div class="list">${xs.map(todoRow).join('')}</div></section>`).join('')}</div>` : `<div class="card">${empty('check', 'Inget kvar att göra 🛋️', 'Njut av lugnet – eller lägg till något ovan.')}</div>`}
-  ${done.length ? `<details class="card done-box"><summary>Klara (${done.length})</summary><div class="list">${done.map(todoRow).join('')}</div><button class="link" data-act="clearDone">${icon('trash')}Rensa klara</button></details>` : ''}`;
+  ${done.length ? `<details class="card done-box" ${keepOpen('done-todos')}><summary>Klara (${done.length})</summary><div class="list">${done.map(todoRow).join('')}</div><button class="link" data-act="clearDone">${icon('trash')}Rensa klara</button></details>` : ''}`;
 }
 const personPick = (v) => { const cur = v || lastPerson(); return `<div class="ppick" role="radiogroup" aria-label="Vem gäller det?">${Object.entries(P).map(([k, l]) => `<label class="p-${k}"><input type="radio" name="person" value="${k}" ${k === cur ? 'checked' : ''}><span class="ppill">${FACES[k] || ''}<em>${l}</em></span></label>`).join('')}</div>`; };
 
@@ -747,13 +827,14 @@ function inkop() {
   return `<div class="bar"><div><h1>Inköpslista</h1><div class="sub">${open.length ? `${open.length} ${open.length === 1 ? 'vara' : 'varor'} kvar` : 'Inget kvar att handla'}${done.length ? ` · ${done.length} i korgen` : ''}</div></div><button class="pill" data-act="mealsToShopping">${icon('meal')}Från veckans matsedel</button></div>
   <form class="quick" data-form="shop"><input name="title" placeholder="Lägg till vara…" required autocomplete="off" enterkeyhint="done" aria-label="Ny vara" maxlength="200"><button class="primary">${icon('plus')}<span>Lägg till</span></button></form>
   ${open.length ? `<div class="groups">${keys.map(k => `<section class="card group"><header><h3>${k === 'Övrigt' ? 'Varor' : esc(k)}</h3><span class="count">${bySrc[k].length}</span></header><div class="list">${bySrc[k].map(row).join('')}</div></section>`).join('')}</div>` : `<div class="card">${empty('cart', 'Inköpslistan är tom 🛒', 'Lägg till varor ovan eller hämta från veckans matsedel.')}</div>`}
-  ${done.length ? `<details class="card done-box"><summary>I korgen (${done.length})</summary><div class="list">${done.map(row).join('')}</div><button class="link" data-act="clearShop">${icon('trash')}Rensa avbockade</button></details>` : ''}`;
+  ${done.length ? `<details class="card done-box" ${keepOpen('done-shop')}><summary>I korgen (${done.length})</summary><div class="list">${done.map(row).join('')}</div><button class="link" data-act="clearShop">${icon('trash')}Rensa avbockade</button></details>` : ''}`;
 }
 
 // ---------- ark/dialoger (bottenark på mobil, modal på platta)
-let closeTimer;
+let closeTimer, dlgAbort = null; // dlgAbort: städar lyssnare som en dialog lagt på den återanvända <dialog>-noden
 function openDlg(html, cls = '', focus = true) {
   const d = $('#dlg'); clearTimeout(closeTimer); d.classList.remove('closing'); if (d.open) d.close();
+  dlgAbort?.abort(); dlgAbort = new AbortController();
   dlgDirty = false;
   d.className = cls; d.innerHTML = `<div class="grab" aria-hidden="true"></div>${html}`;
   const inset = isPhone() ? 28 : 16;
@@ -800,7 +881,7 @@ function form(title, body, onSubmit, extra = '', okText = 'Spara') {
     e.preventDefault(); const er = $('[data-ferr]', f); er.textContent = '';
     const bad = [...f.querySelectorAll('[required]')].find(x => !(x.value || '').trim());
     if (bad) {
-      er.textContent = `Fyll i ”${(bad.closest('.fld')?.querySelector(':scope > span')?.textContent || 'fältet').replace(/[?:]$/, '')}”.`;
+      er.textContent = `Fyll i ”${(bad.closest('.fld')?.querySelector('.fld-l')?.textContent || 'fältet').replace(/[?:]$/, '')}”.`;
       (bad.closest('.tpick')?.querySelector('.tpick-btn') || bad).focus?.();
       bad.scrollIntoView?.({ block: 'center' });
       return;
@@ -815,43 +896,51 @@ function form(title, body, onSubmit, extra = '', okText = 'Spara') {
   };
   return d;
 }
-const field = (label, input, cls = '') => `<div class="fld ${cls}"><span class="fld-l">${label}</span>${input}</div>`;
+// Ett enkelt fält får en riktig <label for>; sammansatta väljare (dag, tid, person) blir en namngiven grupp.
+let fieldSeq = 0;
+function field(label, input, cls = '') {
+  const id = 'fld' + (++fieldSeq); const m = /^\s*<(input|textarea|select)\b/.exec(input);
+  if (m && !/\sid=/.test(input.slice(0, input.indexOf('>')))) return `<div class="fld ${cls}"><label class="fld-l" for="${id}">${label}</label>${input.replace(m[0], m[0] + ` id="${id}"`)}</div>`;
+  return `<div class="fld ${cls}" role="group" aria-labelledby="${id}"><span class="fld-l" id="${id}">${label}</span>${input}</div>`;
+}
 const friendly = err => !navigator.onLine ? 'ingen internetanslutning' : (err?.message || String(err));
 function eventDlg(ev = {}, date) {
   const allDay = !!ev.id && !ev.start;
   const start = ev.start || (ev.id || allDay ? '' : nextHalfHour());
-  const end = ev.end || (start ? addMinsHm(start, 60) : '');
+  const end = ev.id ? (ev.end || '') : (start ? addMinsHm(start, 60) : ''); // lägg inte till en sluttid på en befintlig händelse som saknar en
   form(ev.id ? 'Ändra händelse' : 'Ny händelse', `${field('Vad händer?', `<input name="title" placeholder="T.ex. Tandläkare" value="${esc(ev.title)}" required maxlength="120" autocomplete="off" enterkeyhint="done">${ev.id ? '' : suggestRow(EVENT_SUGGESTS)}`)}
     ${field('Dag', datePick(ev.date || date))}
     <label class="switch"><input type="checkbox" name="allday" ${allDay ? 'checked' : ''}><span class="sw" aria-hidden="true"></span><span>Heldag</span></label>
     <div class="two times" ${allDay ? 'hidden' : ''}>${field('Börjar', timePick('start', start))}${field('Slutar', timePick('end', end))}</div>
+    <p class="muted small nextday" data-nextday role="status" hidden>${icon('moon')}Slutar dagen efter.</p>
     ${field('Vem', personPick(ev.person))}`,
     async v => {
       const o = { title: v.title.trim(), date: v.date, person: v.person || lastPerson(), start: v.allday ? null : v.start || null, end: v.allday ? null : v.end || null };
       if (!o.start) o.end = null;
-      if (o.start && o.end && o.end <= o.start) return 'Sluttiden måste vara efter starttiden.';
+      if (o.start && o.end && o.end === o.start) return 'Sluttiden kan inte vara samma som starttiden.'; // tidigare sluttid än start = slutar dagen efter
       if (!v.allday && !o.start) return 'Välj en starttid, eller kryssa i Heldag.';
       ev.id ? await store.update('events', ev.id, o) : await store.add('events', o);
     },
     ev.id ? `<button type="button" class="danger" id="delEv">${icon('trash')}<span>Ta bort</span></button>` : '');
   const d = $('#dlg'); const sw = $('[name=allday]', d);
+  const startHid = d.querySelector('[data-tpick=start] input[type=hidden]'), endWrap = d.querySelector('[data-tpick=end]'), endHid = $('input[type=hidden]', endWrap);
+  const syncNextDay = () => { $('[data-nextday]', d).hidden = sw.checked || !(startHid.value && endHid.value && endHid.value < startHid.value); };
   const syncAllDay = () => {
     const on = sw.checked;
-    $('.times', d).hidden = on;
+    $('.times', d).hidden = on; syncNextDay();
   };
   sw.onchange = () => { syncAllDay(); markDlgDirty(); buzz(10); };
   bindDatePick(d);
+  let prevStart = start;
   bindTimePickers(d, {
     onChange: (name, value) => {
-      if (name !== 'start' || !value) return;
-      const en = d.querySelector('[data-tpick=end] input[type=hidden]');
-      if (!en) return;
-      if (!en.value || en.value <= value) {
-        en.value = addMinsHm(value, 60);
-        const endWrap = d.querySelector('[data-tpick=end]');
-        const valEl = $('.tpick-val', endWrap); if (valEl) valEl.textContent = en.value;
-        endWrap?.querySelector('.tpick-btn')?.classList.remove('empty');
+      if (name === 'start') {
+        // Ny starttid på eller efter sluttiden: flytta sluttiden en timme fram – men rör inte en sluttid som medvetet låg på nästa dag.
+        const wasOvernight = !!(prevStart && endHid.value && endHid.value < prevStart);
+        if (value && (!endHid.value || (!wasOvernight && endHid.value <= value))) setTpick(endWrap, addMinsHm(value, 60));
+        prevStart = value;
       }
+      syncNextDay();
     },
   });
   syncAllDay();
@@ -874,7 +963,7 @@ function roDlg(e) {
     </div><footer class="sh-f"><span class="sp"></span><button class="primary" data-close>Okej</button></footer></div>`);
 }
 function recipeDlg(r = { ingredients: [], steps: [] }) {
-  form(r.id ? 'Ändra recept' : 'Nytt recept', `${field('Namn', `<input name="title" placeholder="T.ex. Pannkakor" data-ph="recipe" value="${esc(r.title)}" required maxlength="120" autocomplete="off">`)}
+  form(r.id ? 'Ändra recept' : 'Nytt recept', `${field('Namn', `<input name="title" placeholder="T.ex. Pannkakor" value="${esc(r.title)}" required maxlength="120" autocomplete="off">`)}
     ${field('Bildlänk (valfritt)', `<input name="image" type="url" inputmode="url" placeholder="https://…" value="${esc(r.image)}">`)}
     ${field('Ingredienser – en per rad', `<textarea name="ingredients" rows="5" placeholder="3 dl mjöl&#10;6 dl mjölk&#10;3 ägg">${esc(ingr(r).join('\n'))}</textarea>`)}
     ${field('Gör så här – ett steg per rad', `<textarea name="steps" rows="5" placeholder="Vispa ihop smeten&#10;Stek i smör">${esc(stepsOf(r).join('\n'))}</textarea>`)}`,
@@ -913,8 +1002,8 @@ function addMenu() {
     if (a === 'shop') form('Ny vara', field('Vara', '<input name="title" required placeholder="T.ex. Mjölk" maxlength="200" autocomplete="off">'), v => store.add('shopping_items', { title: v.title.trim(), done: false, person: 'gemensamt' }), '', 'Lägg till'); });
 }
 const feedRow = f => { const st = S.feedStatus[f.id]; const [ic] = SRC[feedKind(f.url)] || SRC.other;
-  return `<div class="row-item static feed" data-feedrow="${f.id}">${icon(ic, 'ro-i')}<span class="t"><b>${esc(f.name)}</b><span class="fmeta">${chip(f.person)}<small class="fst ${st ? (st.ok && !st.stale ? 'ok' : 'bad') : ''}">${st ? (st.stale ? '⚠ Visar kopia från ' + new Date(st.at).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }) : st.ok ? '✓ Synkad' : '⚠ Kunde inte hämtas') : S.feedsLoading ? 'Hämtar…' : ''}</small></span></span><button class="del" data-delfeed="${f.id}" aria-label="Ta bort ${esc(f.name)}">${icon('x')}</button></div>`; };
-function updateFeedStatusUi() { const l = $('#feedlist'); if (l) l.innerHTML = (S.data.calendar_feeds || []).map(feedRow).join(''); const u = $('#feedupd'); if (u) u.textContent = lastFeedLoad ? 'Senast uppdaterad ' + new Date(lastFeedLoad).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }) : ''; }
+  return `<div class="row-item static feed" data-feedrow="${f.id}">${icon(ic, 'ro-i')}<span class="t"><b>${esc(f.name)}</b><span class="fmeta">${chip(f.person)}<small class="fst ${st ? (st.ok && !st.stale ? 'ok' : 'bad') : ''}">${st ? (st.stale ? '⚠ Visar kopia från ' + fClock.format(new Date(st.at)) : st.ok ? '✓ Synkad' : '⚠ Kunde inte hämtas') : S.feedsLoading ? 'Hämtar…' : ''}</small></span></span><button class="del" data-delfeed="${f.id}" aria-label="Ta bort ${esc(f.name)}">${icon('x')}</button></div>`; };
+function updateFeedStatusUi() { const l = $('#feedlist'); if (l) l.innerHTML = (S.data.calendar_feeds || []).map(feedRow).join(''); const u = $('#feedupd'); if (u) u.textContent = lastFeedLoad ? 'Senast uppdaterad ' + fClock.format(new Date(lastFeedLoad)) : ''; }
 function settings() {
   const feeds = S.data.calendar_feeds || [];
   const ns = nightSettings();
@@ -930,7 +1019,7 @@ function settings() {
     <details class="set danger-zone"><summary>Avancerat</summary><p class="muted small">Raderar alla händelser, uppgifter, recept, matsedlar, inköpslistor och kalenderlänkar för hela hushållet. Kan inte ångras.</p><button class="danger" id="wipe">${icon('trash')}Rensa all data</button></details>
     </div></div>`, '', false);
   updateFeedStatusUi();
-  for (const id of ['night-enabled', 'night-start', 'night-end']) $('#' + id).onchange = () => { const start = $('#night-start').value, end = $('#night-end').value; if (!start || !end || start === end) return toast('Välj två olika klockslag', true); localStorage.setItem('fs-night', JSON.stringify({ enabled: $('#night-enabled').checked, start, end })); awakeUntil = Date.now() + NIGHT_WAKE_MS; syncNight(); };
+  for (const id of ['night-enabled', 'night-start', 'night-end']) $('#' + id).onchange = () => { const start = $('#night-start').value, end = $('#night-end').value; if (!start || !end || start === end) return toast('Välj två olika klockslag', true); localStorage.setItem('fs-night', JSON.stringify({ enabled: $('#night-enabled').checked, start, end })); nightCache = null; awakeUntil = Date.now() + NIGHT_WAKE_MS; syncNight(); };
   d.querySelectorAll('[data-theme-set]').forEach(b => b.onclick = () => { localStorage.setItem('fs-theme', b.dataset.themeSet); applyTheme(); d.querySelectorAll('[data-theme-set]').forEach(x => { x.classList.toggle('on', x === b); x.setAttribute('aria-checked', x === b); }); });
   if ($('#feedsync')) $('#feedsync').onclick = async e => { const b = e.currentTarget; b.disabled = true; b.classList.add('busy'); await refresh(); await loadFeeds(true); updateFeedStatusUi(); b.disabled = false; b.classList.remove('busy'); toast(S.feedErr.length ? 'Vissa kalendrar kunde inte hämtas' : 'Kalendrarna är uppdaterade', !!S.feedErr.length); };
   $('#feedform') && ($('#feedform').onsubmit = async e => { e.preventDefault(); const v = Object.fromEntries(new FormData(e.target)); v.url = (v.url || '').trim(); v.name = (v.name || '').trim();
@@ -938,10 +1027,21 @@ function settings() {
     if (!/^(webcal|https):\/\/([^/]*\.)?(icloud\.com|calendar\.google\.com|outlook\.office365\.com|outlook\.live\.com|personalkollen\.se)\//i.test(v.url)) { $('#feederr').textContent = 'Länken måste komma från iCloud, Google, Outlook eller Personalkollen.'; return; }
     try { await store.add('calendar_feeds', v); closeDlg(); toast('Kalendern lades till ✓'); await refresh(); loadFeeds(true); } catch (err) { $('#feederr').textContent = 'Kunde inte spara: ' + friendly(err); } });
   d.addEventListener('click', async e => { const b = e.target.closest('[data-delfeed]'); if (!b) return; const f = feeds.find(x => x.id === b.dataset.delfeed);
-    if (!confirm(`Ta bort kalendern ”${f?.name || ''}” från skärmen?`)) return; forgetFeed(b.dataset.delfeed); await store.remove('calendar_feeds', b.dataset.delfeed); closeDlg(); toast('Kalendern togs bort'); await refresh(); loadFeeds(); });
-  $('#wipe').onclick = async () => { if (!confirm('Radera ALL data för hela hushållet? Det går inte att ångra.')) return; for (const t of Object.keys(S.data)) for (const x of S.data[t]) await store.remove(t, x.id); closeDlg(); };
+    if (!confirm(`Ta bort kalendern ”${f?.name || ''}” från skärmen?`)) return; forgetFeed(b.dataset.delfeed); await store.remove('calendar_feeds', b.dataset.delfeed); closeDlg(); toast('Kalendern togs bort'); await refresh(); loadFeeds(); },
+    { signal: dlgAbort.signal }); // dialognoden återanvänds: utan signal staplas en lyssnare per öppning och frågan ställs flera gånger
+  $('#wipe').onclick = async e => {
+    const b = e.currentTarget;
+    if ((prompt('Detta raderar ALL data för hela hushållet och kan inte ångras.\n\nSkriv RADERA för att bekräfta.') || '').trim().toUpperCase() !== 'RADERA') return;
+    b.disabled = true; b.classList.add('busy');
+    try {
+      // En radering per tabell (matsedeln först, eftersom den pekar på recepten)
+      for (const t of ['meal_plan', 'events', 'todos', 'shopping_items', 'recipes', 'calendar_feeds']) await store.clear(t);
+      forgetAllFeeds(); closeDlg(); toast('All data raderades');
+    } catch (err) { toast('Kunde inte radera allt: ' + friendly(err), true); b.disabled = false; b.classList.remove('busy'); }
+    refresh();
+  };
   if ($('#seed')) $('#seed').onclick = async () => { await store.reset(); closeDlg(); };
-  if ($('#out')) $('#out').onclick = async () => { if (!confirm('Logga ut från den här enheten?')) return; await store.signOut(); d.close(); loginScreen(); };
+  if ($('#out')) $('#out').onclick = async () => { if (!confirm('Logga ut från den här enheten?')) return; await store.signOut(); forgetAllFeeds(); d.close(); loginScreen(); };
 }
 
 // ---------- ta bort med ångra
@@ -972,7 +1072,7 @@ document.addEventListener('click', async e => {
   const a = el.closest('[data-act]'); if (!a) return;
   const act = a.dataset.act;
   if (act === 'prev' || act === 'next') { S.week = new Date(S.week); S.week.setDate(S.week.getDate() + (act === 'prev' ? -7 : 7)); render(); }
-  if (act === 'thisweek') { S.week = mondayOf(new Date()); render(); }
+  if (act === 'thisweek') { S.week = thisMonday(); render(); }
   if (act === 'showPast') { S.showPast = true; render(false); }
   if (act === 'reloadFeeds') { await loadFeeds(true); toast(S.feedErr.length ? 'Fortfarande problem med en kalender' : 'Kalendrarna är uppdaterade', !!S.feedErr.length); }
   if (act === 'newEvent') eventDlg({}, a.dataset.date);
@@ -1005,6 +1105,8 @@ document.addEventListener('submit', async e => {
   try {
     if (f === 'todo') await store.add('todos', { title, person: v.person || 'gemensamt', done: false });
     if (f === 'shop') await store.add('shopping_items', { title, done: false, person: 'gemensamt' });
+    // Formuläret ligger kvar över omritningar (se render), så fältet töms här – och bara när det faktiskt sparades.
+    if (e.target.elements.title) e.target.elements.title.value = '';
     toast(f === 'todo' ? 'Uppgiften lades till ✓' : 'Varan lades till ✓');
   } catch (err) { toast('Kunde inte spara: ' + friendly(err), true); }
   setTimeout(() => { const i = $(`[data-form=${f}] input[name=title]`); if (i && !isPhone()) i.focus(); const bb = $(`[data-form=${f}] .primary`); if (bb) bb.disabled = false; }, 200);
@@ -1061,10 +1163,21 @@ function toast(m, bad = false, action = null) {
 }
 
 // ---------- start / inloggning
+let booting = false;
 async function boot() {
-  if (store.getSession && !(await store.getSession())) return loginScreen();
-  shell(); render(); refresh(); wxRefresh(true); transitRefresh(); resetIdle();
+  if (booting || $('#main')) return; booting = true; // kan anropas från flera håll (start, inloggning, återfådd session)
+  try {
+    // Ingen giltig session men en sparad finns kvar = förnyelsen föll på nätet (t.ex. start efter strömavbrott).
+    // Visa då senast sparade data i stället för att fastna på inloggningen; Supabase förnyar sessionen när nätet är tillbaka.
+    if (store.getSession && !(await store.getSession()) && !store.hasStoredSession?.()) return loginScreen();
+    shell(); render(); refresh(); wxRefresh(true); transitRefresh(); resetIdle();
+  } finally { booting = false; }
 }
+store.onAuthChange?.((ev, has) => {
+  if (ev === 'SIGNED_OUT') { if ($('#main')) loginScreen('Du har loggats ut – logga in igen.'); return; } // annars visas gammal data i det tysta
+  if (!has || (ev !== 'SIGNED_IN' && ev !== 'TOKEN_REFRESHED')) return;
+  if ($('#lf')) boot(); else if (Date.now() - lastRefresh > 30e3) refresh();
+});
 function loginScreen(msg = '') {
   clearInterval(tickTimer); wakeLock?.release().catch(() => {});
   $('#app').innerHTML = `<div class="login"><form class="login-card" id="lf">${logo()}<h1>Familjeskärmen</h1>
